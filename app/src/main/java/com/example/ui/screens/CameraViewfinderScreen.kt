@@ -103,6 +103,7 @@ import com.example.model.FlashSetting
 import com.example.model.LogProfile
 import com.example.model.PhotoFilterPreset
 import com.example.model.TimerSetting
+import com.example.model.ZoomOptimizationProfile
 import com.example.ui.components.AiSceneCoachBottomSheet
 import com.example.ui.components.BitrateSelectorBottomSheet
 import com.example.ui.components.CameraSettingsDialog
@@ -371,6 +372,74 @@ fun CameraViewfinderScreen(
                     )
                 }
 
+                // Capture Format Quick Pill (Photo: JPG / RAW+JPG / PNG / HEIF-WEBP | Video: MP4 / HEVC MP4 / RAW MOV / RAW MKV)
+                val formatBadgeLabel = if (state.activeMode == CameraMode.VIDEO) {
+                    state.videoFormat.badgeLabel
+                } else {
+                    state.photoFormat.badgeLabel
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(ObsidianGlass)
+                        .border(1.dp, GalaxyAmber.copy(alpha = 0.75f), RoundedCornerShape(20.dp))
+                        .clickable {
+                            if (state.activeMode == CameraMode.VIDEO) {
+                                viewModel.cycleVideoFormat()
+                            } else {
+                                viewModel.cyclePhotoFormat()
+                            }
+                        }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("cycle_capture_format_button")
+                ) {
+                    Text(
+                        text = "FMT: $formatBadgeLabel",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = GalaxyAmber,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // AI Zoom & Auto Picture Quality Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(
+                            if (state.aiZoomAutoEnhanceEnabled) EmeraldOptimal.copy(alpha = 0.20f) else ObsidianGlass
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (state.aiZoomAutoEnhanceEnabled) EmeraldOptimal else DividerSubtle,
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                        .clickable { viewModel.toggleAiZoomAutoEnhance() }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("toggle_ai_zoom_quality_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = "AI Zoom Auto Quality",
+                        tint = if (state.aiZoomAutoEnhanceEnabled) EmeraldOptimal else TextSecondaryZinc,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = when {
+                            !state.aiZoomAutoEnhanceEnabled -> "AI HD OFF"
+                            state.currentZoomRatio >= 2.0f -> "AI ${String.format("%.0fx", state.currentZoomRatio)} SR"
+                            else -> "AI AUTO HD"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (state.aiZoomAutoEnhanceEnabled) EmeraldOptimal else TextSecondaryZinc,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
                 // Bitrate Quick Pill (10 - 1000 Mbps)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -598,12 +667,11 @@ fun CameraViewfinderScreen(
                 else -> Unit
             }
 
-            // Optical / Digital Zoom Pills (0.5x, 1x, 2x, 5x, 10x)
+            // Optical / Hybrid AI Super-Resolution Zoom Pills (0.6x, 1x, 2x, 5x, 10x)
             ZoomPresetSelectorBar(
                 currentZoom = state.currentZoomRatio,
                 presets = state.hardwareCapabilities.zoomPresets,
-                minSupported = state.hardwareCapabilities.minZoomRatio,
-                maxSupported = state.hardwareCapabilities.maxZoomRatio,
+                aiZoomAutoEnhanceEnabled = state.aiZoomAutoEnhanceEnabled,
                 onSelectZoom = viewModel::setZoomRatio
             )
 
@@ -679,9 +747,11 @@ fun CameraViewfinderScreen(
             CameraSettingsDialog(
                 state = state,
                 onTogglePhotoResolution = viewModel::togglePhotoResolution,
+                onCyclePhotoFormat = viewModel::cyclePhotoFormat,
                 onToggleVideoResolution = {
                     viewModel.toggleVideoResolution(lifecycleOwner, previewView)
                 },
+                onCycleVideoFormat = viewModel::cycleVideoFormat,
                 onToggleVideoFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },
@@ -690,6 +760,7 @@ fun CameraViewfinderScreen(
                 onToggleDiagnosticLogs = viewModel::toggleDiagnosticLogsOverlay,
                 onToggleVideoStabilization = viewModel::toggleVideoStabilization,
                 onToggleAiOptimizer = viewModel::toggleAiSceneOptimizer,
+                onToggleAiZoomAutoEnhance = viewModel::toggleAiZoomAutoEnhance,
                 onToggleGridLines = viewModel::toggleGridLines,
                 onToggleWatermark = viewModel::toggleWatermark,
                 onToggleVolumeShutter = viewModel::toggleVolumeButtonShutter,
@@ -720,7 +791,7 @@ private fun LiveDiagnosticLogsHud(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "PRO TELEMETRY & HARDWARE LOGS • ${state.videoResolution.shortLabel} | ${state.videoBitrateMbps} Mbps | ${state.activeLogProfile.shortCode}",
+                text = "200MP 1/1.4\" OIS • SD 7 GEN 4 • ANDROID 16 / MAGICOS 10 • ${state.activeZoomProfile.badgeLabel}",
                 style = MaterialTheme.typography.labelSmall,
                 color = AiCyan,
                 fontWeight = FontWeight.Bold
@@ -877,7 +948,7 @@ private fun TopQuickSettingsBar(
         } else {
             state.photoResolution.shortLabel
         }
-        val resHighlighted = resLabel.contains("4K") || resLabel.contains("50MP")
+        val resHighlighted = resLabel.contains("200MP") || resLabel.contains("50MP") || resLabel.contains("4K")
         TopTextPillButton(
             label = resLabel,
             highlighted = resHighlighted,
@@ -1010,50 +1081,77 @@ private fun AuxiliaryEffectSliderBar(
 private fun ZoomPresetSelectorBar(
     currentZoom: Float,
     presets: List<Float>,
-    minSupported: Float,
-    maxSupported: Float,
+    aiZoomAutoEnhanceEnabled: Boolean,
     onSelectZoom: (Float) -> Unit
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(ObsidianGlass)
-            .border(1.dp, DividerSubtle, CircleShape)
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
-        presets.forEach { preset ->
-            val isAvailable = preset in (minSupported - 0.55f)..(maxSupported + 0.1f)
-            val isSelected = abs(currentZoom - preset.coerceIn(minSupported, maxSupported)) < 0.25f &&
-                (preset != 0.5f || minSupported < 0.9f)
-            val label = if (preset == 0.5f) {
-                "0.5"
-            } else if (isSelected) {
-                String.format("%.1fx", currentZoom).removeSuffix(".0x") +
-                    if (String.format("%.1fx", currentZoom).endsWith(".0x")) "x" else ""
-            } else {
-                "${preset.toInt()}x"
-            }
+    val activeProfile = remember(currentZoom) {
+        ZoomOptimizationProfile.fromZoomRatio(currentZoom)
+    }
 
-            Box(
-                contentAlignment = Alignment.Center,
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (aiZoomAutoEnhanceEnabled) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .size(if (isSelected) 38.dp else 32.dp)
+                    .padding(bottom = 5.dp)
                     .clip(CircleShape)
-                    .background(if (isSelected) GalaxyAmber else ObsidianElevated)
-                    .clickable(enabled = isAvailable) { onSelectZoom(preset) }
-                    .testTag("zoom_pill_${preset.toString().replace('.', '_')}")
+                    .background(ObsidianGlass)
+                    .border(1.dp, EmeraldOptimal.copy(alpha = 0.65f), CircleShape)
+                    .padding(horizontal = 10.dp, vertical = 3.dp)
             ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = when {
-                        isSelected -> AmoledBlack
-                        else -> TextPrimaryWhite
-                    }
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = EmeraldOptimal,
+                    modifier = Modifier.size(12.dp)
                 )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "${activeProfile.badgeLabel} • OIS ACTIVE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = EmeraldOptimal,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp
+                )
+            }
+        }
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(ObsidianGlass)
+                .border(1.dp, DividerSubtle, CircleShape)
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        ) {
+            presets.forEach { preset ->
+                val isSelected = abs(currentZoom - preset) < 0.18f
+                val label = when {
+                    preset < 1.0f -> if (isSelected) String.format("%.1fx", currentZoom) else String.format("%.1f", preset)
+                    isSelected -> {
+                        val formatted = String.format("%.1fx", currentZoom)
+                        if (formatted.endsWith(".0x")) "${currentZoom.roundToInt()}x" else formatted
+                    }
+                    else -> "${preset.roundToInt()}x"
+                }
+
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(if (isSelected) 40.dp else 34.dp)
+                        .clip(CircleShape)
+                        .background(if (isSelected) GalaxyAmber else ObsidianElevated)
+                        .clickable { onSelectZoom(preset) }
+                        .testTag("zoom_pill_${preset.toString().replace('.', '_')}")
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isSelected) AmoledBlack else TextPrimaryWhite
+                    )
+                }
             }
         }
     }

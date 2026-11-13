@@ -27,14 +27,17 @@ import com.example.model.LutCategory
 import com.example.model.MediaItem
 import com.example.model.PhotoEditState
 import com.example.model.PhotoFilterPreset
+import com.example.model.PhotoFormatSetting
 import com.example.model.PhotoResolutionSetting
 import com.example.model.ProCameraSettings
 import com.example.model.ProParameterTab
 import com.example.model.RealTimeSceneMetrics
 import com.example.model.TimerSetting
+import com.example.model.VideoFormatSetting
 import com.example.model.VideoFpsSetting
 import com.example.model.VideoResolutionSetting
 import com.example.model.WhiteBalancePreset
+import com.example.model.ZoomOptimizationProfile
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -76,8 +79,10 @@ data class CameraUiState(
     val timerSetting: TimerSetting = TimerSetting.OFF,
     val activeCountdownSec: Int = 0,
     val photoResolution: PhotoResolutionSetting = PhotoResolutionSetting.UHD_4K,
+    val photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG,
     val aspectRatio: AspectRatioSetting = AspectRatioSetting.RATIO_9_16,
     val videoResolution: VideoResolutionSetting = VideoResolutionSetting.UHD_4K,
+    val videoFormat: VideoFormatSetting = VideoFormatSetting.MP4_AVC,
     val videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
     val videoBitrateMbps: Int = 250, // Adjustable from 10 Mbps up to 1000 Mbps
     val activeLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
@@ -89,7 +94,9 @@ data class CameraUiState(
     val watermarkEnabled: Boolean = true,
     val volumeButtonShutterEnabled: Boolean = true,
     val aiSceneOptimizerEnabled: Boolean = true,
+    val aiZoomAutoEnhanceEnabled: Boolean = true,
     val currentZoomRatio: Float = 1.0f,
+    val extraHybridZoomFactor: Float = 1.0f,
     val portraitBlurStrength: Float = 0.65f,
     val beautySmoothness: Float = 0.55f,
     val proSettings: ProCameraSettings = ProCameraSettings(),
@@ -111,7 +118,10 @@ data class CameraUiState(
     val photoEditState: PhotoEditState = PhotoEditState(),
     val isSavingEdit: Boolean = false,
     val statusBannerMessage: String? = null
-)
+) {
+    val activeZoomProfile: ZoomOptimizationProfile
+        get() = ZoomOptimizationProfile.fromZoomRatio(currentZoomRatio)
+}
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -132,7 +142,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
-        appendDiagnosticLog("INIT", "Galaxy 4K UHD Engine initialized | Default 4K 3840×2160 | Bitrate 250 Mbps")
+        appendDiagnosticLog(
+            "INIT",
+            "200MP 1/1.4\" OIS + 12MP UW | Snapdragon 7 Gen 4 | Android 16 / MagicOS 10"
+        )
         refreshGallery()
     }
 
@@ -194,9 +207,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { current ->
                     current.copy(hardwareCapabilities = caps)
                 }
-            },
-            onZoomChanged = { zoom ->
-                _uiState.update { it.copy(currentZoomRatio = zoom) }
+                val extraScale = hardwareController.setZoomRatio(_uiState.value.currentZoomRatio)
+                _uiState.update { current ->
+                    current.copy(extraHybridZoomFactor = extraScale)
+                }
             },
             onDiagnosticLog = { tag, msg ->
                 appendDiagnosticLog(tag, msg)
@@ -273,6 +287,36 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         showStatusBanner("Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
     }
 
+    // Photo & Video Formats (JPG, RAW+JPG .dng, PNG, WEBP / MP4, HEVC MP4, RAW MOV, RAW MKV)
+    fun cyclePhotoFormat() {
+        val entries = PhotoFormatSetting.entries
+        val currentIdx = entries.indexOf(_uiState.value.photoFormat).coerceAtLeast(0)
+        val next = entries[(currentIdx + 1) % entries.size]
+        _uiState.update { it.copy(photoFormat = next) }
+        appendDiagnosticLog("FORMAT", "Photo Format -> ${next.fullTitle} (.${next.extension})")
+        showStatusBanner("Photo Format: ${next.fullTitle}")
+    }
+
+    fun cycleVideoFormat() {
+        val entries = VideoFormatSetting.entries
+        val currentIdx = entries.indexOf(_uiState.value.videoFormat).coerceAtLeast(0)
+        val next = entries[(currentIdx + 1) % entries.size]
+        _uiState.update { it.copy(videoFormat = next) }
+        appendDiagnosticLog("VID-FMT", "Video Container Format -> ${next.fullTitle} (.${next.extension})")
+        showStatusBanner("Video Format: ${next.fullTitle}")
+    }
+
+    // AI Zoom Super-Resolution & Auto Quality Enhancer
+    fun toggleAiZoomAutoEnhance() {
+        val next = !_uiState.value.aiZoomAutoEnhanceEnabled
+        _uiState.update { it.copy(aiZoomAutoEnhanceEnabled = next) }
+        appendDiagnosticLog("AI-QUALITY", "AI Super-Resolution & Auto Quality Enhancer -> ${if (next) "ON" else "OFF"}")
+        showStatusBanner(
+            if (next) "AI Super-Res Zoom & Auto Picture Quality ON"
+            else "AI Auto Picture Quality Enhancer OFF"
+        )
+    }
+
     // Video Bitrate up to 1000 Mbps
     fun updateVideoBitrateMbps(
         mbps: Int,
@@ -306,7 +350,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 lensFacing = nextLens,
                 torchEnabled = false,
-                currentZoomRatio = 1.0f
+                currentZoomRatio = 1.0f,
+                extraHybridZoomFactor = 1.0f
             )
         }
         bindCameraToLifecycle(lifecycleOwner, previewView)
@@ -368,7 +413,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun togglePhotoResolution() {
         val next = when (_uiState.value.photoResolution) {
             PhotoResolutionSetting.UHD_4K -> PhotoResolutionSetting.ULTRA_HD_50MP
-            PhotoResolutionSetting.ULTRA_HD_50MP -> PhotoResolutionSetting.HD_12MP
+            PhotoResolutionSetting.ULTRA_HD_50MP -> PhotoResolutionSetting.ULTRA_HD_200MP
+            PhotoResolutionSetting.ULTRA_HD_200MP -> PhotoResolutionSetting.HD_12MP
             PhotoResolutionSetting.HD_12MP -> PhotoResolutionSetting.UHD_4K
         }
         _uiState.update { it.copy(photoResolution = next) }
@@ -404,8 +450,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val next = !_uiState.value.videoStabilizationEnabled
         _uiState.update { it.copy(videoStabilizationEnabled = next) }
         hardwareController.applyCamera2Parameters(_uiState.value.proSettings, next)
-        appendDiagnosticLog("OIS/EIS", "Super Steady Stabilization -> $next")
-        showStatusBanner(if (next) "Super Steady Video Stabilization ON" else "Video Stabilization OFF")
+        appendDiagnosticLog("OIS/EIS", "Optical Image Stabilization (OIS) + EIS -> $next")
+        showStatusBanner(if (next) "OIS + Super Steady Stabilization ON" else "OIS / Video Stabilization OFF")
     }
 
     fun toggleAiSceneOptimizer() {
@@ -427,14 +473,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setZoomRatio(ratio: Float) {
-        val caps = _uiState.value.hardwareCapabilities
-        if (ratio < caps.minZoomRatio && ratio == 0.5f) {
-            showStatusBanner("0.5x Ultra-Wide lens not separate on this device; set to widest optical (${String.format("%.1fx", caps.minZoomRatio)}).")
+        val effective = ratio.coerceIn(0.6f, 10.0f)
+        val extraScale = hardwareController.setZoomRatio(effective)
+        val profile = ZoomOptimizationProfile.fromZoomRatio(effective)
+        _uiState.update {
+            it.copy(
+                currentZoomRatio = effective,
+                extraHybridZoomFactor = extraScale
+            )
         }
-        val effective = ratio.coerceIn(caps.minZoomRatio, caps.maxZoomRatio)
-        hardwareController.setZoomRatio(effective)
-        _uiState.update { it.copy(currentZoomRatio = effective) }
-        appendDiagnosticLog("ZOOM", "Optical/Digital Zoom -> ${String.format("%.2fx", effective)}")
+        appendDiagnosticLog(
+            "ZOOM-ISP",
+            "${profile.badgeLabel} | ${profile.pipelineSummary}"
+        )
+        if (effective in listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)) {
+            showStatusBanner("${profile.badgeLabel}: ${profile.pipelineSummary}")
+        }
     }
 
     fun onViewfinderTapped(x: Float, y: Float) {
@@ -587,7 +641,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         appendDiagnosticLog(
             "CAPTURE",
-            "Capturing ${state.photoResolution.shortLabel} | LUT=${state.activeLut.label} | Log=${state.activeLogProfile.shortCode}"
+            "Capturing ${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} | Zoom=${String.format("%.1fx", state.currentZoomRatio)} | AI-SR=${state.aiZoomAutoEnhanceEnabled}"
         )
 
         viewModelScope.launch {
@@ -604,12 +658,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         rawBitmap = capturedBitmap,
                         mode = state.activeMode,
                         resolution = state.photoResolution,
+                        photoFormat = state.photoFormat,
                         aspectRatio = state.aspectRatio,
                         proSettings = state.proSettings,
                         activeLut = state.activeLut,
                         lutIntensity = state.lutIntensity,
                         activeLogProfile = state.activeLogProfile,
                         aiSceneOptimizerEnabled = state.aiSceneOptimizerEnabled,
+                        aiZoomAutoEnhanceEnabled = state.aiZoomAutoEnhanceEnabled,
+                        currentZoomRatio = state.currentZoomRatio,
+                        extraHybridZoomFactor = state.extraHybridZoomFactor,
                         detectedScene = state.sceneMetrics.detectedScene,
                         portraitBlurStrength = state.portraitBlurStrength,
                         beautySmoothness = state.beautySmoothness,
@@ -617,11 +675,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     _uiState.update { it.copy(isCapturingPhoto = false) }
                     if (savedUri != null) {
-                        appendDiagnosticLog("MEDIASTORE", "Saved ${state.photoResolution.shortLabel} JPEG -> $savedUri")
+                        val aiTag = if (state.aiZoomAutoEnhanceEnabled) "AI Super-Res " else ""
+                        appendDiagnosticLog(
+                            "MEDIASTORE",
+                            "Saved $aiTag${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} (${String.format("%.1fx", state.currentZoomRatio)}) -> $savedUri"
+                        )
                         refreshGallery()
-                        showStatusBanner("Saved ${state.photoResolution.shortLabel} (${state.activeLut.label} • ${state.activeLogProfile.shortCode})")
+                        showStatusBanner(
+                            "Saved $aiTag${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} (${String.format("%.1fx", state.currentZoomRatio)})"
+                        )
                     } else {
-                        appendDiagnosticLog("ERROR", "Failed saving 4K JPEG to MediaStore")
+                        appendDiagnosticLog("ERROR", "Failed saving 4K photo to MediaStore")
                         showStatusBanner("Failed to save photo to MediaStore.")
                     }
                 }
@@ -643,6 +707,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 enableAudio = state.hasAudioPermission,
                 videoBitrateMbps = state.videoBitrateMbps,
                 videoResolution = state.videoResolution,
+                videoFormat = state.videoFormat,
                 onDiagnosticLog = { tag, msg -> appendDiagnosticLog(tag, msg) },
                 onEvent = { status ->
                     when (status) {
@@ -666,7 +731,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                                 )
                             }
                             refreshGallery()
-                            showStatusBanner("Saved ${state.videoResolution.shortLabel} @ ${state.videoBitrateMbps} Mbps to Gallery")
+                            showStatusBanner(
+                                "Saved ${state.videoResolution.shortLabel} ${state.videoFormat.badgeLabel} (.${state.videoFormat.extension}) @ ${state.videoBitrateMbps} Mbps"
+                            )
                         }
                         is VideoRecordStatus.Error -> {
                             _uiState.update {

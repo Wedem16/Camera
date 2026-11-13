@@ -17,19 +17,19 @@ enum class CameraMode(
     PHOTO(
         label = "PHOTO",
         badgeTitle = "4K Galaxy Photo",
-        description = "True 4K Ultra HD capture with Film/Travel LUTs & Smart Scene Optimization",
+        description = "True 4K Ultra HD capture with AI Zoom Super-Resolution & Film/Travel LUTs",
         isDefaultCarousel = true
     ),
     VIDEO(
         label = "VIDEO",
         badgeTitle = "4K Pro Video",
-        description = "4K UHD 3840×2160 recording up to 1000 Mbps bitrate with Cinema Log & LUTs",
+        description = "4K UHD 3840×2160 recording up to 1000 Mbps in MP4, HEVC, RAW MOV & MKV",
         isDefaultCarousel = true
     ),
     PRO(
         label = "PRO",
         badgeTitle = "Manual Pro 4K",
-        description = "Full Camera2 manual control over ISO, Shutter, WB, Focus, LUT & Log Profile",
+        description = "Full Camera2 manual control over ISO, Shutter, WB, Focus, RAW DNG, LUT & Log",
         isDefaultCarousel = true
     ),
     NIGHT(
@@ -78,9 +78,135 @@ enum class PhotoResolutionSetting(
     val targetLongEdgePx: Int,
     val targetShortEdgePx: Int
 ) {
+    ULTRA_HD_200MP("200MP", "200MP 1/1.4\" OIS Main Camera (4608×3456)", 100, 4608, 3456),
+    ULTRA_HD_50MP("UHD 50MP", "50MP Adaptive Pixel Master (4096×3072)", 100, 4096, 3072),
     UHD_4K("4K UHD", "4K Ultra HD (3840×2160)", 100, 3840, 2160),
-    ULTRA_HD_50MP("UHD 50MP", "50MP Ultra HD Master (4096×3072)", 100, 4096, 3072),
-    HD_12MP("HD 12MP", "12MP Dual Pixel (3264×2448)", 95, 3264, 2448)
+    HD_12MP("12MP UW", "12MP Ultra-Wide / Dual Pixel (3264×2448)", 98, 3264, 2448)
+}
+
+/**
+ * Dedicated per-focal-length Zoom Processing & ISP Optimization Profiles
+ * tuned for the 200MP 1/1.4" OIS Main + 12MP Ultra-Wide + Snapdragon 7 Gen 4 ISP.
+ */
+enum class ZoomOptimizationProfile(
+    val badgeLabel: String,
+    val sensorLabel: String,
+    val pipelineSummary: String,
+    val contrastMultiplier: Float,
+    val saturationMultiplier: Float,
+    val shadowLiftOffset: Float,
+    val microDetailOverlayAlpha: Int,
+    val microDetailContrast: Float
+) {
+    ULTRAWIDE_12MP_0_6X(
+        badgeLabel = "0.6x 12MP ULTRA-WIDE",
+        sensorLabel = "12MP Ultra-Wide Camera (0.6x)",
+        pipelineSummary = "12MP Ultra-Wide sensor • Edge distortion guard & balanced HDR dynamic range",
+        contrastMultiplier = 1.03f,
+        saturationMultiplier = 1.04f,
+        shadowLiftOffset = 2f,
+        microDetailOverlayAlpha = 18,
+        microDetailContrast = 1.18f
+    ),
+    NATIVE_200MP_1X(
+        badgeLabel = "1x 200MP 1/1.4\" OIS",
+        sensorLabel = "200MP Main Camera (1/1.4\" Sensor • OIS)",
+        pipelineSummary = "Original 200MP sensor • Natural details, organic sharpness, accurate colors & low noise",
+        contrastMultiplier = 1.03f,
+        saturationMultiplier = 1.03f,
+        shadowLiftOffset = 2f,
+        microDetailOverlayAlpha = 16,
+        microDetailContrast = 1.16f
+    ),
+    SENSOR_CROP_2X(
+        badgeLabel = "2x 200MP IN-SENSOR CROP",
+        sensorLabel = "200MP In-Sensor 2x Lossless Crop • OIS",
+        pipelineSummary = "High-quality 200MP sensor cropping with intelligent noise reduction & detail preservation",
+        contrastMultiplier = 1.05f,
+        saturationMultiplier = 1.03f,
+        shadowLiftOffset = 3f,
+        microDetailOverlayAlpha = 22,
+        microDetailContrast = 1.22f
+    ),
+    DEDICATED_3X_SUPER_RES(
+        badgeLabel = "3x MULTI-FRAME SUPER-RES",
+        sensorLabel = "Dedicated 3x Optimization Profile • OIS",
+        pipelineSummary = "Multi-frame super-res • Advanced NR • Natural detail & texture preservation • Adaptive edge clarity & low-light boost",
+        contrastMultiplier = 1.07f,
+        saturationMultiplier = 1.04f,
+        shadowLiftOffset = 5f,
+        microDetailOverlayAlpha = 28,
+        microDetailContrast = 1.26f
+    ),
+    DIGITAL_RECONSTRUCTION_4X_5X(
+        badgeLabel = "4x–5x AI RECONSTRUCTION",
+        sensorLabel = "4x–5x Intelligent Reconstruction • OIS",
+        pipelineSummary = "Advanced digital zoom enhancement & intelligent sub-pixel image reconstruction",
+        contrastMultiplier = 1.06f,
+        saturationMultiplier = 1.03f,
+        shadowLiftOffset = 3f,
+        microDetailOverlayAlpha = 25,
+        microDetailContrast = 1.24f
+    ),
+    NATURAL_TELEPHOTO_10X(
+        badgeLabel = "10x NATURAL TELEPHOTO",
+        sensorLabel = "10x Natural Telephoto Engine • OIS",
+        pipelineSummary = "Prioritizes realistic details • Minimizes digital noise, watercolor artifacts & artificial oversharpening",
+        contrastMultiplier = 1.04f,
+        saturationMultiplier = 1.02f,
+        shadowLiftOffset = 2f,
+        microDetailOverlayAlpha = 19,
+        microDetailContrast = 1.18f
+    );
+
+    companion object {
+        fun fromZoomRatio(zoom: Float): ZoomOptimizationProfile {
+            return when {
+                zoom < 0.85f -> ULTRAWIDE_12MP_0_6X
+                zoom < 1.55f -> NATIVE_200MP_1X
+                zoom < 2.55f -> SENSOR_CROP_2X
+                zoom < 3.65f -> DEDICATED_3X_SUPER_RES
+                zoom < 7.50f -> DIGITAL_RECONSTRUCTION_4X_5X
+                else -> NATURAL_TELEPHOTO_10X
+            }
+        }
+    }
+}
+
+/**
+ * Photo Capture File Formats (JPEG, RAW DNG + JPEG, Lossless PNG, High-Efficiency WebP/HEIF).
+ */
+enum class PhotoFormatSetting(
+    val shortLabel: String,
+    val fullTitle: String,
+    val fileExtension: String,
+    val mimeType: String
+) {
+    JPEG("JPG", "4K Fine JPEG (.JPG)", "jpg", "image/jpeg"),
+    RAW_DNG("RAW+JPG", "Pro Uncompressed RAW (.DNG + 4K .JPG)", "dng", "image/x-adobe-dng"),
+    PNG_LOSSLESS("PNG", "16-Bit Style Lossless PNG (.PNG)", "png", "image/png"),
+    WEBP_LOSSLESS("HEIF/WEBP", "Lossless High-Efficiency (.WEBP)", "webp", "image/webp");
+
+    val badgeLabel: String get() = shortLabel
+    val extension: String get() = fileExtension
+}
+
+/**
+ * Video Container & Codec Formats (MP4 AVC, MP4 HEVC, Cinema RAW MOV, Matroska MKV).
+ */
+enum class VideoFormatSetting(
+    val shortLabel: String,
+    val fullTitle: String,
+    val fileExtension: String,
+    val mimeType: String
+) {
+    MP4_AVC("MP4", "Standard MP4 (H.264 AVC)", "mp4", "video/mp4"),
+    MP4_HEVC("HEVC MP4", "Pro 10-Bit Style HEVC (H.265 .MP4)", "mp4", "video/mp4"),
+    RAW_CINEMA_MOV("RAW MOV", "Cinema RAW Uncompressed All-I (.MOV)", "mov", "video/quicktime"),
+    MKV_MASTER("RAW MKV", "Studio Master Container (.MKV)", "mkv", "video/x-matroska");
+
+    val badgeLabel: String get() = shortLabel
+    val extension: String get() = fileExtension
 }
 
 enum class AspectRatioSetting(
@@ -245,7 +371,6 @@ enum class PhotoFilterPreset(
     val gGain: Float = 1.0f,
     val bGain: Float = 1.0f
 ) {
-    // Default / Bypass
     ORIGINAL("Original (No LUT)", LutCategory.ALL, 1.0f, 1.0f, 0f, 0f, 1.0f, 1.0f, 1.0f),
 
     // Film Stock LUTs
@@ -291,11 +416,11 @@ enum class WhiteBalancePreset(val label: String, val kelvin: Int) {
 }
 
 data class ProCameraSettings(
-    val iso: Int? = null, // null = Auto, else 50..3200
-    val shutterSpeedNs: Long? = null, // null = Auto, else ns (e.g., 1/4000s = 250_000L to 1s = 1_000_000_000L)
+    val iso: Int? = null,
+    val shutterSpeedNs: Long? = null,
     val whiteBalance: WhiteBalancePreset = WhiteBalancePreset.AUTO,
-    val customKelvin: Int = 5500, // 2300..10000K
-    val manualFocusDistance: Float? = null, // null = Auto AF, else 0.0f (Infinity) .. 1.0f (Macro)
+    val customKelvin: Int = 5500,
+    val manualFocusDistance: Float? = null,
     val exposureCompensationIndex: Int = 0
 ) {
     val formattedIso: String
@@ -337,19 +462,26 @@ data class HardwareCapabilities(
     val hasRearCamera: Boolean = true,
     val hasFrontCamera: Boolean = true,
     val hasFlashUnit: Boolean = true,
-    val minZoomRatio: Float = 1.0f,
+    val minZoomRatio: Float = 0.6f,
     val maxZoomRatio: Float = 10.0f,
-    val zoomPresets: List<Float> = listOf(0.5f, 1.0f, 2.0f, 5.0f, 10.0f),
-    val supportsUltraWideOptical: Boolean = false,
+    val sensorMaxZoomRatio: Float = 8.0f,
+    val sensorMinZoomRatio: Float = 1.0f,
+    val zoomPresets: List<Float> = listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f),
+    val supportsUltraWideOptical: Boolean = true,
     val supports4K: Boolean = true,
     val supports60Fps: Boolean = true,
     val supportsVideoStabilization: Boolean = true,
+    val hasOpticalImageStabilization: Boolean = true,
     val supportsManualSensor: Boolean = true,
     val minExposureIndex: Int = -8,
     val maxExposureIndex: Int = 8,
     val exposureStepEv: Float = 0.25f,
     val minFocusDistanceDiopters: Float = 10.0f,
-    val hardwareLevelLabel: String = "LEVEL_3"
+    val hardwareLevelLabel: String = "LEVEL_3",
+    val mainSensorSpec: String = "200MP 1/1.4\" ISOCELL • OIS",
+    val ultraWideSensorSpec: String = "12MP Ultra-Wide (0.6x)",
+    val socPlatformSpec: String = "Snapdragon 7 Gen 4 ISP",
+    val osPlatformSpec: String = "Android 16 • MagicOS 10"
 )
 
 enum class SceneCategory(
@@ -371,9 +503,9 @@ enum class SceneCategory(
 
 data class RealTimeSceneMetrics(
     val detectedScene: SceneCategory = SceneCategory.AUTO,
-    val averageLuminance: Float = 128f, // 0..255
+    val averageLuminance: Float = 128f,
     val dynamicRangeRatio: Float = 0.5f,
-    val colorWarmthScore: Float = 0.0f, // -1 (cool) .. +1 (warm)
+    val colorWarmthScore: Float = 0.0f,
     val histogramBins: List<Float> = List(16) { 0.2f }
 )
 
@@ -436,12 +568,12 @@ enum class CropAspectPreset(val label: String, val ratio: Float?) {
 data class PhotoEditState(
     val filter: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
     val logProfile: LogProfile = LogProfile.STANDARD_REC709,
-    val brightness: Float = 0f, // -60f .. +60f
-    val contrast: Float = 1.0f, // 0.6f .. 1.6f
-    val saturation: Float = 1.0f, // 0.0f .. 2.0f
-    val warmth: Float = 0f, // -40f .. +40f
-    val vignette: Float = 0.15f, // 0.0f .. 1.0f
-    val rotationDegrees: Int = 0, // 0, 90, 180, 270
+    val brightness: Float = 0f,
+    val contrast: Float = 1.0f,
+    val saturation: Float = 1.0f,
+    val warmth: Float = 0f,
+    val vignette: Float = 0.15f,
+    val rotationDegrees: Int = 0,
     val cropAspect: CropAspectPreset = CropAspectPreset.ORIGINAL,
     val showGalaxyWatermark: Boolean = true
 )

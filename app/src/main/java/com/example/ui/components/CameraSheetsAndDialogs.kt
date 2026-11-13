@@ -961,13 +961,16 @@ private fun RecommendedPill(label: String, value: String) {
 fun CameraSettingsDialog(
     state: CameraUiState,
     onTogglePhotoResolution: () -> Unit,
+    onCyclePhotoFormat: () -> Unit,
     onToggleVideoResolution: () -> Unit,
+    onCycleVideoFormat: () -> Unit,
     onToggleVideoFps: () -> Unit,
     onOpenBitrateSheet: () -> Unit,
     onOpenLutLogSheet: () -> Unit,
     onToggleDiagnosticLogs: () -> Unit,
     onToggleVideoStabilization: () -> Unit,
     onToggleAiOptimizer: () -> Unit,
+    onToggleAiZoomAutoEnhance: () -> Unit,
     onToggleGridLines: () -> Unit,
     onToggleWatermark: () -> Unit,
     onToggleVolumeShutter: () -> Unit,
@@ -990,12 +993,12 @@ fun CameraSettingsDialog(
             ) {
                 Column {
                     Text(
-                        text = "GALAXY 4K CAMERA SETTINGS",
+                        text = "GALAXY 200MP & 4K CAMERA SETTINGS",
                         style = MaterialTheme.typography.labelLarge,
                         color = GalaxyAmber
                     )
                     Text(
-                        text = "4K UHD Pipeline • 1000 Mbps Bitrate • LUTs & Logs",
+                        text = "200MP 1/1.4\" OIS • 12MP UW • Snapdragon 7 Gen 4 • MagicOS 10",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondaryZinc
                     )
@@ -1020,23 +1023,23 @@ fun CameraSettingsDialog(
                     .padding(12.dp)
             ) {
                 Text(
-                    text = "ACTIVE 4K SENSOR & ENCODER PIPELINE",
+                    text = "${caps.mainSensorSpec} + ${caps.ultraWideSensorSpec}",
                     style = MaterialTheme.typography.labelSmall,
                     color = AiCyan
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Photo: ${state.photoResolution.shortLabel} • Video: ${state.videoResolution.shortLabel} @ ${state.videoBitrateMbps} Mbps",
+                    text = "${caps.socPlatformSpec} • ${caps.osPlatformSpec}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = TextPrimaryWhite
+                    color = EmeraldOptimal
                 )
                 Text(
-                    text = "LUT: ${state.activeLut.label} • Log: ${state.activeLogProfile.shortCode} (${state.activeLogProfile.dynamicRangeStops})",
+                    text = "Zoom ISP: ${state.activeZoomProfile.badgeLabel}",
                     style = MaterialTheme.typography.labelSmall,
                     color = GalaxyAmber
                 )
                 Text(
-                    text = "Camera2 Level: ${caps.hardwareLevelLabel} • Zoom: ${String.format("%.1fx–%.1fx", caps.minZoomRatio, caps.maxZoomRatio)}",
+                    text = state.activeZoomProfile.pipelineSummary,
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondaryZinc
                 )
@@ -1045,11 +1048,27 @@ fun CameraSettingsDialog(
             Spacer(modifier = Modifier.height(14.dp))
 
             SettingActionRow(
-                title = "Photo Resolution (4K / 50MP)",
+                title = "Photo Capture Format (RAW / JPG / PNG)",
+                subtitle = state.photoFormat.fullTitle,
+                badge = state.photoFormat.badgeLabel,
+                onClick = onCyclePhotoFormat,
+                testTag = "setting_photo_format"
+            )
+
+            SettingActionRow(
+                title = "Photo Resolution (200MP / 50MP / 4K / 12MP)",
                 subtitle = state.photoResolution.fullTitle,
                 badge = state.photoResolution.shortLabel,
                 onClick = onTogglePhotoResolution,
                 testTag = "setting_photo_resolution"
+            )
+
+            SettingActionRow(
+                title = "Video Container Format (MP4 / MOV / MKV)",
+                subtitle = state.videoFormat.fullTitle,
+                badge = state.videoFormat.badgeLabel,
+                onClick = onCycleVideoFormat,
+                testTag = "setting_video_format"
             )
 
             SettingActionRow(
@@ -1096,6 +1115,22 @@ fun CameraSettingsDialog(
             )
 
             SettingToggleRow(
+                title = "AI Zoom & Auto Picture Quality",
+                subtitle = "Automatically sharpen & upscale 1x–10x zoomed captures",
+                checked = state.aiZoomAutoEnhanceEnabled,
+                onCheckedChange = { onToggleAiZoomAutoEnhance() },
+                testTag = "setting_ai_zoom_enhance"
+            )
+
+            SettingToggleRow(
+                title = "AI Scene Optimizer",
+                subtitle = "Real-time luminance & color scene tuning",
+                checked = state.aiSceneOptimizerEnabled,
+                onCheckedChange = { onToggleAiOptimizer() },
+                testTag = "setting_ai_optimizer"
+            )
+
+            SettingToggleRow(
                 title = "Live Pro Telemetry & Logs HUD",
                 subtitle = "Show real-time hardware, bitrate & LUT logs on screen",
                 checked = state.showDiagnosticLogsOverlay,
@@ -1109,14 +1144,6 @@ fun CameraSettingsDialog(
                 checked = state.videoStabilizationEnabled,
                 onCheckedChange = { onToggleVideoStabilization() },
                 testTag = "setting_video_stabilization"
-            )
-
-            SettingToggleRow(
-                title = "AI Scene Optimizer",
-                subtitle = "Real-time luminance & color scene tuning",
-                checked = state.aiSceneOptimizerEnabled,
-                onCheckedChange = { onToggleAiOptimizer() },
-                testTag = "setting_ai_optimizer"
             )
 
             SettingToggleRow(
