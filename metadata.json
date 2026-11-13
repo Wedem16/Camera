@@ -1,0 +1,6 @@
+{
+  "name": "Galaxy HD Camera",
+  "description": "Samsung Galaxy-inspired flagship Android camera app featuring Pro manual controls, 4K/60fps video, computational modes, hybrid AI scene optimization, and an integrated photo studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
