@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -30,6 +31,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +40,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -46,7 +51,9 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Button
@@ -69,7 +76,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -86,11 +96,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.MediaGalleryRepository
 import com.example.model.CameraMode
+import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
+import com.example.model.LogProfile
+import com.example.model.PhotoFilterPreset
 import com.example.model.TimerSetting
 import com.example.ui.components.AiSceneCoachBottomSheet
+import com.example.ui.components.BitrateSelectorBottomSheet
 import com.example.ui.components.CameraSettingsDialog
+import com.example.ui.components.LutAndLogBottomSheet
 import com.example.ui.components.MoreModesBottomSheet
 import com.example.ui.components.ProControlsOverlay
 import com.example.ui.theme.AiCyan
@@ -101,7 +117,6 @@ import com.example.ui.theme.EmeraldOptimal
 import com.example.ui.theme.GalaxyAmber
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianGlass
-import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.RecordCrimson
 import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
@@ -135,9 +150,25 @@ fun CameraViewfinderScreen(
         }
     }
 
-    DisposableEffect(lifecycleOwner, state.hasCameraPermission) {
+    // Re-bind automatically when switching between Video Mode (2-stream 4K UHD high-bitrate)
+    // and Photo Modes (3-stream Max-Res 4K/50MP ImageCapture)
+    val isVideoMode = state.activeMode == CameraMode.VIDEO
+    DisposableEffect(lifecycleOwner, state.hasCameraPermission, isVideoMode) {
         viewModel.bindCameraToLifecycle(lifecycleOwner, previewView)
         onDispose { }
+    }
+
+    // Live Android ColorMatrix for real-time viewfinder LUT + Cinema Log preview
+    val liveAndroidColorMatrix = remember(state.activeLut, state.lutIntensity, state.activeLogProfile) {
+        if (state.activeLut == PhotoFilterPreset.ORIGINAL && state.activeLogProfile == LogProfile.STANDARD_REC709) {
+            null
+        } else {
+            MediaGalleryRepository.buildCombinedColorMatrix(
+                lut = state.activeLut,
+                lutIntensity = state.lutIntensity,
+                logProfile = state.activeLogProfile
+            )
+        }
     }
 
     BoxWithConstraints(
@@ -147,7 +178,7 @@ fun CameraViewfinderScreen(
     ) {
         val density = LocalDensity.current
 
-        // 1. Live CameraX Viewfinder Layer + Multi-Touch Pinch-to-Zoom & Tap-to-Focus
+        // 1. Live CameraX Viewfinder Layer + Real-Time LUT/Log Color Grading
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -168,15 +199,31 @@ fun CameraViewfinderScreen(
         ) {
             AndroidView(
                 factory = { previewView },
+                update = { view ->
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        if (liveAndroidColorMatrix != null) {
+                            view.setRenderEffect(
+                                android.graphics.RenderEffect.createColorFilterEffect(
+                                    android.graphics.ColorMatrixColorFilter(liveAndroidColorMatrix)
+                                )
+                            )
+                        } else {
+                            view.setRenderEffect(null)
+                        }
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
 
-            // 2. Computational Mode Live Viewfinder Shader / Framing Overlay
+            // 2. Computational Mode & Live LUT/Log Framing Overlay
             ViewfinderModeOverlayCanvas(
                 mode = state.activeMode,
                 gridLinesEnabled = state.gridLinesEnabled,
                 portraitBlurStrength = state.portraitBlurStrength,
-                manualFocusActive = state.activeMode == CameraMode.PRO && state.proSettings.manualFocusDistance != null
+                manualFocusActive = state.activeMode == CameraMode.PRO && state.proSettings.manualFocusDistance != null,
+                activeLut = state.activeLut,
+                activeLogProfile = state.activeLogProfile,
+                lutIntensity = state.lutIntensity
             )
 
             // 3. Tap-to-Focus Reticle + Interactive Exposure/Brightness Slider
@@ -205,7 +252,6 @@ fun CameraViewfinderScreen(
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    // Compact EV Brightness Slider below focus ring
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -277,7 +323,7 @@ fun CameraViewfinderScreen(
             }
         }
 
-        // 6. Top Floating Samsung Quick Controls Bar
+        // 6. Top Floating Samsung Quick Controls Bar + LUT / Log / Bitrate / Logs HUD Strip
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -305,44 +351,118 @@ fun CameraViewfinderScreen(
                 onOpenSettings = { viewModel.setShowSettingsDialog(true) }
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Active Video Recording Timecode Pill OR AI Scene Optimizer + Mode Badge Row
+            // Second Quick Row: Active Video Timecode OR Mode + Bitrate (up to 1000 Mbps) + LUT/Log + Logs HUD + AI Coach
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (state.isRecordingVideo) {
                     VideoRecordingTimecodeBadge(
                         durationMs = state.recordingDurationMs,
+                        bytesRecorded = state.recordingBytes,
                         isPaused = state.isVideoPaused,
                         resolutionLabel = state.videoResolution.shortLabel,
-                        fpsLabel = state.videoFps.label
+                        bitrateMbps = state.videoBitrateMbps
                     )
-                } else {
-                    // Active Mode Status Pill
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(ObsidianGlass)
-                            .border(1.dp, DividerSubtle, RoundedCornerShape(20.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(GalaxyAmber)
+                }
+
+                // Bitrate Quick Pill (10 - 1000 Mbps)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(ObsidianGlass)
+                        .border(1.dp, GalaxyAmber.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
+                        .clickable { viewModel.setShowBitrateSheet(true) }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("open_bitrate_sheet_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "Video Bitrate",
+                        tint = GalaxyAmber,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "${state.videoBitrateMbps} Mbps",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = GalaxyAmber,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Film & Travel LUT + Cinema Log Quick Pill
+                val hasActiveLutOrLog = state.activeLut != PhotoFilterPreset.ORIGINAL ||
+                    state.activeLogProfile != LogProfile.STANDARD_REC709
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(ObsidianGlass)
+                        .border(
+                            width = 1.dp,
+                            color = if (hasActiveLutOrLog) EmeraldOptimal else DividerSubtle,
+                            shape = RoundedCornerShape(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = state.activeMode.badgeTitle.uppercase(),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = TextPrimaryWhite
+                        .clickable { viewModel.setShowLutLogSheet(true) }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("open_lut_log_sheet_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ColorLens,
+                        contentDescription = "LUT & Log Profile",
+                        tint = if (hasActiveLutOrLog) EmeraldOptimal else AiCyan,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (state.activeLut == PhotoFilterPreset.ORIGINAL) {
+                            "LUT • ${state.activeLogProfile.shortCode}"
+                        } else {
+                            "${state.activeLut.label} • ${state.activeLogProfile.shortCode}"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (hasActiveLutOrLog) EmeraldOptimal else TextPrimaryWhite,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Live Pro Telemetry & Diagnostic Logs Toggle Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(if (state.showDiagnosticLogsOverlay) AiCyan.copy(alpha = 0.22f) else ObsidianGlass)
+                        .border(
+                            width = 1.dp,
+                            color = if (state.showDiagnosticLogsOverlay) AiCyan else DividerSubtle,
+                            shape = RoundedCornerShape(20.dp)
                         )
-                    }
+                        .clickable { viewModel.toggleDiagnosticLogsOverlay() }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("toggle_logs_hud_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Terminal,
+                        contentDescription = "Live Telemetry Logs",
+                        tint = if (state.showDiagnosticLogsOverlay) AiCyan else TextSecondaryZinc,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "LOGS (${state.diagnosticLogs.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (state.showDiagnosticLogsOverlay) AiCyan else TextPrimaryWhite
+                    )
                 }
 
                 // Hybrid AI Scene Optimizer Pill + Gemini Coach Button
@@ -358,16 +478,16 @@ fun CameraViewfinderScreen(
                         )
                         .clickable { viewModel.requestGeminiSceneCritique() }
                         .minimumInteractiveComponentSize()
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
                         .testTag("ai_scene_coach_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = stringResource(R.string.ai_optimizer_desc),
                         tint = AiCyan,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = if (state.aiSceneOptimizerEnabled) {
                             "AI: ${state.sceneMetrics.detectedScene.displayTitle}"
@@ -381,6 +501,19 @@ fun CameraViewfinderScreen(
                 }
             }
 
+            // Live Diagnostic Telemetry & Log Console Overlay (when toggled ON)
+            AnimatedVisibility(
+                visible = state.showDiagnosticLogsOverlay,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                LiveDiagnosticLogsHud(
+                    state = state,
+                    logs = state.diagnosticLogs,
+                    onClearLogs = viewModel::clearDiagnosticLogs
+                )
+            }
+
             // Transient Toast / Status Banner
             AnimatedVisibility(
                 visible = state.statusBannerMessage != null,
@@ -390,7 +523,7 @@ fun CameraViewfinderScreen(
                 state.statusBannerMessage?.let { msg ->
                     Box(
                         modifier = Modifier
-                            .padding(top = 10.dp)
+                            .padding(top = 8.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(ObsidianGlass)
                             .border(1.dp, GalaxyAmber.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
@@ -426,7 +559,6 @@ fun CameraViewfinderScreen(
                 .padding(top = 12.dp, bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Mode-specific Auxiliary Deck (Pro Controls, Portrait Blur Slider, or Beauty Slider)
             when (state.activeMode) {
                 CameraMode.PRO -> {
                     ProControlsOverlay(
@@ -501,6 +633,29 @@ fun CameraViewfinderScreen(
         }
 
         // Modal Sheets & Dialogs
+        if (state.showLutLogSheet) {
+            LutAndLogBottomSheet(
+                state = state,
+                onSelectCategory = viewModel::selectLutCategory,
+                onSelectLut = viewModel::selectActiveLut,
+                onUpdateIntensity = viewModel::updateLutIntensity,
+                onSelectLogProfile = viewModel::selectLogProfile,
+                onDismiss = { viewModel.setShowLutLogSheet(false) }
+            )
+        }
+
+        if (state.showBitrateSheet) {
+            BitrateSelectorBottomSheet(
+                currentBitrateMbps = state.videoBitrateMbps,
+                videoResolutionLabel = state.videoResolution.shortLabel,
+                videoFpsLabel = state.videoFps.label,
+                onSelectBitrateMbps = { mbps ->
+                    viewModel.updateVideoBitrateMbps(mbps, lifecycleOwner, previewView)
+                },
+                onDismiss = { viewModel.setShowBitrateSheet(false) }
+            )
+        }
+
         if (state.showMoreModesSheet) {
             MoreModesBottomSheet(
                 activeMode = state.activeMode,
@@ -530,6 +685,9 @@ fun CameraViewfinderScreen(
                 onToggleVideoFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },
+                onOpenBitrateSheet = { viewModel.setShowBitrateSheet(true) },
+                onOpenLutLogSheet = { viewModel.setShowLutLogSheet(true) },
+                onToggleDiagnosticLogs = viewModel::toggleDiagnosticLogsOverlay,
                 onToggleVideoStabilization = viewModel::toggleVideoStabilization,
                 onToggleAiOptimizer = viewModel::toggleAiSceneOptimizer,
                 onToggleGridLines = viewModel::toggleGridLines,
@@ -537,6 +695,78 @@ fun CameraViewfinderScreen(
                 onToggleVolumeShutter = viewModel::toggleVolumeButtonShutter,
                 onDismiss = { viewModel.setShowSettingsDialog(false) }
             )
+        }
+    }
+}
+
+@Composable
+private fun LiveDiagnosticLogsHud(
+    state: CameraUiState,
+    logs: List<DiagnosticLogEntry>,
+    onClearLogs: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(ObsidianGlass)
+            .border(1.dp, AiCyan.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            .padding(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "PRO TELEMETRY & HARDWARE LOGS • ${state.videoResolution.shortLabel} | ${state.videoBitrateMbps} Mbps | ${state.activeLogProfile.shortCode}",
+                style = MaterialTheme.typography.labelSmall,
+                color = AiCyan,
+                fontWeight = FontWeight.Bold
+            )
+            Icon(
+                imageVector = Icons.Default.DeleteSweep,
+                contentDescription = "Clear logs",
+                tint = TextSecondaryZinc,
+                modifier = Modifier
+                    .size(16.dp)
+                    .clickable(onClick = onClearLogs)
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 115.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            items(logs, key = { it.id }) { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = entry.timestamp,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondaryZinc,
+                        fontSize = 9.sp
+                    )
+                    Text(
+                        text = "[${entry.tag}]",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GalaxyAmber,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp
+                    )
+                    Text(
+                        text = entry.message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextPrimaryWhite,
+                        fontSize = 9.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -562,7 +792,6 @@ private fun TopQuickSettingsBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. Settings Gear
         IconButton(
             onClick = onOpenSettings,
             modifier = Modifier.testTag("top_settings_button")
@@ -574,7 +803,6 @@ private fun TopQuickSettingsBar(
             )
         }
 
-        // 2. Flash Control (Auto / On / Off)
         val flashIcon = when (state.flashSetting) {
             FlashSetting.AUTO -> Icons.Default.FlashAuto
             FlashSetting.ON -> Icons.Default.FlashOn
@@ -591,7 +819,6 @@ private fun TopQuickSettingsBar(
             )
         }
 
-        // 3. Dedicated Flashlight / Torch Shortcut
         IconButton(
             onClick = onToggleTorch,
             modifier = Modifier.testTag("top_torch_button")
@@ -603,7 +830,6 @@ private fun TopQuickSettingsBar(
             )
         }
 
-        // 4. Countdown Timer (Off / 3s / 5s / 10s)
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -630,7 +856,6 @@ private fun TopQuickSettingsBar(
             }
         }
 
-        // 5. Aspect Ratio (3:4, 9:16, 1:1, FULL) or FPS (30/60fps in Video Mode)
         if (state.activeMode == CameraMode.VIDEO) {
             TopTextPillButton(
                 label = state.videoFps.label,
@@ -641,23 +866,18 @@ private fun TopQuickSettingsBar(
         } else {
             TopTextPillButton(
                 label = state.aspectRatio.label,
-                highlighted = false,
+                highlighted = state.aspectRatio.label.contains("4K"),
                 onClick = onCycleAspectRatio,
                 testTag = "top_aspect_button"
             )
         }
 
-        // 6. Resolution Badge (HD 12MP / UHD 50MP or FHD / UHD 4K)
         val resLabel = if (state.activeMode == CameraMode.VIDEO) {
             state.videoResolution.shortLabel
         } else {
             state.photoResolution.shortLabel
         }
-        val resHighlighted = if (state.activeMode == CameraMode.VIDEO) {
-            state.videoResolution.name.contains("4K")
-        } else {
-            state.photoResolution.name.contains("50MP")
-        }
+        val resHighlighted = resLabel.contains("4K") || resLabel.contains("50MP")
         TopTextPillButton(
             label = resLabel,
             highlighted = resHighlighted,
@@ -701,21 +921,23 @@ private fun TopTextPillButton(
 @Composable
 private fun VideoRecordingTimecodeBadge(
     durationMs: Long,
+    bytesRecorded: Long,
     isPaused: Boolean,
     resolutionLabel: String,
-    fpsLabel: String
+    bitrateMbps: Int
 ) {
     val totalSecs = durationMs / 1000L
     val mins = totalSecs / 60L
     val secs = totalSecs % 60L
     val formatted = String.format("%02d:%02d", mins, secs)
+    val mbSize = bytesRecorded / (1024f * 1024f)
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
             .background(RecordCrimson.copy(alpha = 0.88f))
-            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
             .testTag("video_timecode_badge")
     ) {
         Box(
@@ -724,7 +946,7 @@ private fun VideoRecordingTimecodeBadge(
                 .clip(CircleShape)
                 .background(if (isPaused) GalaxyAmber else TextPrimaryWhite)
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = if (isPaused) "PAUSED $formatted" else "REC $formatted",
             style = MaterialTheme.typography.labelMedium,
@@ -733,9 +955,9 @@ private fun VideoRecordingTimecodeBadge(
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = "$resolutionLabel • $fpsLabel",
+            text = "$resolutionLabel • ${bitrateMbps}M • ${String.format("%.1fMB", mbSize)}",
             style = MaterialTheme.typography.labelSmall,
-            color = TextPrimaryWhite.copy(alpha = 0.9f)
+            color = TextPrimaryWhite.copy(alpha = 0.92f)
         )
     }
 }
@@ -882,7 +1104,6 @@ private fun ShootingModeCarousel(
             }
         }
 
-        // MORE Drawer Pill
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -924,7 +1145,6 @@ private fun BottomShutterDeck(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Left Slot: Pause/Resume during video recording OR Gallery Thumbnail
         if (state.isRecordingVideo) {
             IconButton(
                 onClick = onTogglePauseVideo,
@@ -971,7 +1191,6 @@ private fun BottomShutterDeck(
             }
         }
 
-        // Center Slot: Samsung Flagship Concentric Shutter / Video Trigger
         val isVideoMode = state.activeMode == CameraMode.VIDEO
         Box(
             contentAlignment = Alignment.Center,
@@ -1016,7 +1235,6 @@ private fun BottomShutterDeck(
             }
         }
 
-        // Right Slot: Live Video Still Snapshot during recording OR Switch Front/Rear Camera
         if (state.isRecordingVideo) {
             IconButton(
                 onClick = onCaptureLiveSnapshot,
@@ -1059,11 +1277,31 @@ private fun ViewfinderModeOverlayCanvas(
     mode: CameraMode,
     gridLinesEnabled: Boolean,
     portraitBlurStrength: Float,
-    manualFocusActive: Boolean
+    manualFocusActive: Boolean,
+    activeLut: PhotoFilterPreset,
+    activeLogProfile: LogProfile,
+    lutIntensity: Float
 ) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
+
+        // Subtle atmospheric LUT / Log tint overlay for SurfaceView fallback devices
+        if (activeLut != PhotoFilterPreset.ORIGINAL && lutIntensity > 0.05f) {
+            val warmth = activeLut.warmth * lutIntensity
+            val tintColor = when {
+                warmth > 8f -> Color(0xFFFFB347).copy(alpha = (0.08f * lutIntensity).coerceAtMost(0.14f))
+                warmth < -8f -> Color(0xFF38BDF8).copy(alpha = (0.08f * lutIntensity).coerceAtMost(0.14f))
+                else -> Color.Transparent
+            }
+            if (tintColor != Color.Transparent) {
+                drawRect(color = tintColor)
+            }
+        }
+        if (activeLogProfile != LogProfile.STANDARD_REC709) {
+            // Flat shadow lift haze representing Log gamma curve
+            drawRect(color = Color.White.copy(alpha = 0.05f))
+        }
 
         // 1. 3x3 Rule-of-Thirds Composition Grid
         if (gridLinesEnabled) {
@@ -1150,7 +1388,7 @@ private fun PermissionOnboardingContent(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "GALAXY HD CAMERA",
+            text = "GALAXY HD CAMERA 4K",
             style = MaterialTheme.typography.labelLarge,
             color = GalaxyAmber
         )

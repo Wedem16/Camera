@@ -18,9 +18,12 @@ import com.example.model.AiCoachUiState
 import com.example.model.AspectRatioSetting
 import com.example.model.CameraMode
 import com.example.model.CropAspectPreset
+import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
 import com.example.model.GeminiSceneCritique
 import com.example.model.HardwareCapabilities
+import com.example.model.LogProfile
+import com.example.model.LutCategory
 import com.example.model.MediaItem
 import com.example.model.PhotoEditState
 import com.example.model.PhotoFilterPreset
@@ -39,6 +42,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 enum class ActiveAppScreen {
     CAMERA_VIEWFINDER,
@@ -60,15 +67,23 @@ data class CameraUiState(
     val showMoreModesSheet: Boolean = false,
     val showSettingsDialog: Boolean = false,
     val showAiCoachSheet: Boolean = false,
+    val showLutLogSheet: Boolean = false,
+    val showBitrateSheet: Boolean = false,
+    val showDiagnosticLogsOverlay: Boolean = false,
     val lensFacing: Int = CameraSelector.LENS_FACING_BACK,
     val flashSetting: FlashSetting = FlashSetting.AUTO,
     val torchEnabled: Boolean = false,
     val timerSetting: TimerSetting = TimerSetting.OFF,
     val activeCountdownSec: Int = 0,
-    val photoResolution: PhotoResolutionSetting = PhotoResolutionSetting.ULTRA_HD_50MP,
-    val aspectRatio: AspectRatioSetting = AspectRatioSetting.RATIO_3_4,
-    val videoResolution: VideoResolutionSetting = VideoResolutionSetting.FHD_1080P,
-    val videoFps: VideoFpsSetting = VideoFpsSetting.FPS_30,
+    val photoResolution: PhotoResolutionSetting = PhotoResolutionSetting.UHD_4K,
+    val aspectRatio: AspectRatioSetting = AspectRatioSetting.RATIO_9_16,
+    val videoResolution: VideoResolutionSetting = VideoResolutionSetting.UHD_4K,
+    val videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
+    val videoBitrateMbps: Int = 250, // Adjustable from 10 Mbps up to 1000 Mbps
+    val activeLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
+    val lutIntensity: Float = 1.0f,
+    val selectedLutCategory: LutCategory = LutCategory.ALL,
+    val activeLogProfile: LogProfile = LogProfile.STANDARD_REC709,
     val videoStabilizationEnabled: Boolean = true,
     val gridLinesEnabled: Boolean = true,
     val watermarkEnabled: Boolean = true,
@@ -87,8 +102,10 @@ data class CameraUiState(
     val isRecordingVideo: Boolean = false,
     val isVideoPaused: Boolean = false,
     val recordingDurationMs: Long = 0L,
+    val recordingBytes: Long = 0L,
     val sceneMetrics: RealTimeSceneMetrics = RealTimeSceneMetrics(),
     val aiCoachState: AiCoachUiState = AiCoachUiState.Idle,
+    val diagnosticLogs: List<DiagnosticLogEntry> = emptyList(),
     val mediaList: List<MediaItem> = emptyList(),
     val selectedMediaItem: MediaItem? = null,
     val photoEditState: PhotoEditState = PhotoEditState(),
@@ -105,6 +122,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
+    private val logIdGenerator = AtomicLong(1L)
     private var focusDismissJob: Job? = null
     private var bannerDismissJob: Job? = null
     private var countdownJob: Job? = null
@@ -114,7 +132,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        appendDiagnosticLog("INIT", "Galaxy 4K UHD Engine initialized | Default 4K 3840×2160 | Bitrate 250 Mbps")
         refreshGallery()
+    }
+
+    fun appendDiagnosticLog(tag: String, message: String) {
+        val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val entry = DiagnosticLogEntry(
+            id = logIdGenerator.getAndIncrement(),
+            timestamp = timeStr,
+            tag = tag,
+            message = message
+        )
+        _uiState.update { current ->
+            val updated = (listOf(entry) + current.diagnosticLogs).take(45)
+            current.copy(diagnosticLogs = updated)
+        }
+    }
+
+    fun clearDiagnosticLogs() {
+        _uiState.update { it.copy(diagnosticLogs = emptyList()) }
+        appendDiagnosticLog("LOGS", "Diagnostic console cleared")
+    }
+
+    fun toggleDiagnosticLogsOverlay() {
+        val next = !_uiState.value.showDiagnosticLogsOverlay
+        _uiState.update { it.copy(showDiagnosticLogsOverlay = next) }
+        showStatusBanner(if (next) "Live Pro Telemetry & Logs HUD ON" else "Live Pro Logs HUD OFF")
     }
 
     fun onPermissionsUpdated(cameraGranted: Boolean, audioGranted: Boolean) {
@@ -124,6 +168,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 hasAudioPermission = audioGranted
             )
         }
+        appendDiagnosticLog("PERM", "Camera=$cameraGranted | Microphone=$audioGranted")
         if (cameraGranted) {
             refreshGallery()
         }
@@ -136,35 +181,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         hardwareController.bindCamera(
             lifecycleOwner = lifecycleOwner,
             previewView = previewView,
+            isVideoMode = state.activeMode == CameraMode.VIDEO,
             lensFacing = state.lensFacing,
             flashSetting = state.flashSetting,
             videoResolution = state.videoResolution,
             videoFps = state.videoFps,
+            videoBitrateMbps = state.videoBitrateMbps,
             videoStabilizationEnabled = state.videoStabilizationEnabled,
             proSettings = state.proSettings,
             frameAnalyzer = realTimeAnalyzer,
             onHardwareInspected = { caps ->
                 _uiState.update { current ->
-                    // Auto-adjust unsupported video settings if needed
-                    val validVideoRes = if (!caps.supports4K && current.videoResolution == VideoResolutionSetting.UHD_4K) {
-                        VideoResolutionSetting.FHD_1080P
-                    } else {
-                        current.videoResolution
-                    }
-                    val validFps = if (!caps.supports60Fps && current.videoFps == VideoFpsSetting.FPS_60) {
-                        VideoFpsSetting.FPS_30
-                    } else {
-                        current.videoFps
-                    }
-                    current.copy(
-                        hardwareCapabilities = caps,
-                        videoResolution = validVideoRes,
-                        videoFps = validFps
-                    )
+                    current.copy(hardwareCapabilities = caps)
                 }
             },
             onZoomChanged = { zoom ->
                 _uiState.update { it.copy(currentZoomRatio = zoom) }
+            },
+            onDiagnosticLog = { tag, msg ->
+                appendDiagnosticLog(tag, msg)
             },
             onError = { errorMsg ->
                 showStatusBanner(errorMsg)
@@ -183,6 +218,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 showMoreModesSheet = false
             )
         }
+        appendDiagnosticLog("MODE", "Switched to ${mode.badgeTitle} (${mode.name})")
         showStatusBanner("${mode.badgeTitle}: ${mode.description}")
     }
 
@@ -206,6 +242,49 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setShowSettingsDialog(visible: Boolean) {
         _uiState.update { it.copy(showSettingsDialog = visible) }
+    }
+
+    fun setShowLutLogSheet(visible: Boolean) {
+        _uiState.update { it.copy(showLutLogSheet = visible) }
+    }
+
+    fun setShowBitrateSheet(visible: Boolean) {
+        _uiState.update { it.copy(showBitrateSheet = visible) }
+    }
+
+    // LUT & Cinema Log Controls
+    fun selectLutCategory(category: LutCategory) {
+        _uiState.update { it.copy(selectedLutCategory = category) }
+    }
+
+    fun selectActiveLut(lut: PhotoFilterPreset) {
+        _uiState.update { it.copy(activeLut = lut) }
+        appendDiagnosticLog("LUT", "Applied LUT: ${lut.label} (${lut.category.label})")
+        showStatusBanner("LUT: ${lut.label}")
+    }
+
+    fun updateLutIntensity(intensity: Float) {
+        _uiState.update { it.copy(lutIntensity = intensity.coerceIn(0f, 1f)) }
+    }
+
+    fun selectLogProfile(profile: LogProfile) {
+        _uiState.update { it.copy(activeLogProfile = profile) }
+        appendDiagnosticLog("LOG-CURVE", "Active Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
+        showStatusBanner("Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
+    }
+
+    // Video Bitrate up to 1000 Mbps
+    fun updateVideoBitrateMbps(
+        mbps: Int,
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
+        val clamped = mbps.coerceIn(10, 1000)
+        _uiState.update { it.copy(videoBitrateMbps = clamped) }
+        appendDiagnosticLog("BITRATE", "Target Video Bitrate set to $clamped Mbps (${clamped * 1000} kbps)")
+        if (lifecycleOwner != null && previewView != null && _uiState.value.activeMode == CameraMode.VIDEO && !_uiState.value.isRecordingVideo) {
+            bindCameraToLifecycle(lifecycleOwner, previewView)
+        }
     }
 
     fun toggleLensFacing(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
@@ -246,6 +325,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         hardwareController.setFlashSetting(next)
         _uiState.update { it.copy(flashSetting = next) }
+        appendDiagnosticLog("FLASH", "Flash mode -> ${next.label}")
         showStatusBanner("Flash: ${next.label}")
     }
 
@@ -258,6 +338,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val nextTorch = !_uiState.value.torchEnabled
         hardwareController.setTorchEnabled(nextTorch)
         _uiState.update { it.copy(torchEnabled = nextTorch) }
+        appendDiagnosticLog("TORCH", "Torch shortcut -> ${if (nextTorch) "ON" else "OFF"}")
         showStatusBanner(if (nextTorch) "Flashlight Torch ON" else "Flashlight Torch OFF")
     }
 
@@ -274,54 +355,48 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cycleAspectRatio() {
         val next = when (_uiState.value.aspectRatio) {
-            AspectRatioSetting.RATIO_3_4 -> AspectRatioSetting.RATIO_9_16
-            AspectRatioSetting.RATIO_9_16 -> AspectRatioSetting.RATIO_1_1
+            AspectRatioSetting.RATIO_9_16 -> AspectRatioSetting.RATIO_3_4
+            AspectRatioSetting.RATIO_3_4 -> AspectRatioSetting.RATIO_1_1
             AspectRatioSetting.RATIO_1_1 -> AspectRatioSetting.RATIO_FULL
-            AspectRatioSetting.RATIO_FULL -> AspectRatioSetting.RATIO_3_4
+            AspectRatioSetting.RATIO_FULL -> AspectRatioSetting.RATIO_9_16
         }
         _uiState.update { it.copy(aspectRatio = next) }
+        appendDiagnosticLog("ASPECT", "Aspect ratio -> ${next.label}")
         showStatusBanner("Aspect Ratio: ${next.label}")
     }
 
     fun togglePhotoResolution() {
-        val next = if (_uiState.value.photoResolution == PhotoResolutionSetting.HD_12MP) {
-            PhotoResolutionSetting.ULTRA_HD_50MP
-        } else {
-            PhotoResolutionSetting.HD_12MP
+        val next = when (_uiState.value.photoResolution) {
+            PhotoResolutionSetting.UHD_4K -> PhotoResolutionSetting.ULTRA_HD_50MP
+            PhotoResolutionSetting.ULTRA_HD_50MP -> PhotoResolutionSetting.HD_12MP
+            PhotoResolutionSetting.HD_12MP -> PhotoResolutionSetting.UHD_4K
         }
         _uiState.update { it.copy(photoResolution = next) }
+        appendDiagnosticLog("PHOTO-RES", "Photo resolution -> ${next.fullTitle}")
         showStatusBanner("Photo Quality: ${next.fullTitle}")
     }
 
     fun toggleVideoResolution(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        val caps = _uiState.value.hardwareCapabilities
-        if (_uiState.value.videoResolution == VideoResolutionSetting.FHD_1080P) {
-            if (!caps.supports4K) {
-                showStatusBanner("4K UHD is not supported by this device's camera sensor; keeping FHD 1080p.")
-                return
-            }
-            _uiState.update { it.copy(videoResolution = VideoResolutionSetting.UHD_4K) }
-            showStatusBanner("Video Resolution: Ultra HD 4K")
+        val next = if (_uiState.value.videoResolution == VideoResolutionSetting.UHD_4K) {
+            VideoResolutionSetting.FHD_1080P
         } else {
-            _uiState.update { it.copy(videoResolution = VideoResolutionSetting.FHD_1080P) }
-            showStatusBanner("Video Resolution: Full HD 1080p")
+            VideoResolutionSetting.UHD_4K
         }
+        _uiState.update { it.copy(videoResolution = next) }
+        appendDiagnosticLog("VIDEO-RES", "Video resolution -> ${next.fullTitle}")
+        showStatusBanner("Video Resolution: ${next.fullTitle}")
         bindCameraToLifecycle(lifecycleOwner, previewView)
     }
 
     fun toggleVideoFps(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        val caps = _uiState.value.hardwareCapabilities
-        if (_uiState.value.videoFps == VideoFpsSetting.FPS_30) {
-            if (!caps.supports60Fps) {
-                showStatusBanner("60fps hardware stream not reported; using 30fps.")
-                return
-            }
-            _uiState.update { it.copy(videoFps = VideoFpsSetting.FPS_60) }
-            showStatusBanner("Frame Rate: 60 FPS Smooth Motion")
+        val next = if (_uiState.value.videoFps == VideoFpsSetting.FPS_60) {
+            VideoFpsSetting.FPS_30
         } else {
-            _uiState.update { it.copy(videoFps = VideoFpsSetting.FPS_30) }
-            showStatusBanner("Frame Rate: 30 FPS Standard")
+            VideoFpsSetting.FPS_60
         }
+        _uiState.update { it.copy(videoFps = next) }
+        appendDiagnosticLog("FPS", "Video frame rate -> ${next.label}")
+        showStatusBanner("Frame Rate: ${next.label}")
         bindCameraToLifecycle(lifecycleOwner, previewView)
     }
 
@@ -329,6 +404,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val next = !_uiState.value.videoStabilizationEnabled
         _uiState.update { it.copy(videoStabilizationEnabled = next) }
         hardwareController.applyCamera2Parameters(_uiState.value.proSettings, next)
+        appendDiagnosticLog("OIS/EIS", "Super Steady Stabilization -> $next")
         showStatusBanner(if (next) "Super Steady Video Stabilization ON" else "Video Stabilization OFF")
     }
 
@@ -358,6 +434,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val effective = ratio.coerceIn(caps.minZoomRatio, caps.maxZoomRatio)
         hardwareController.setZoomRatio(effective)
         _uiState.update { it.copy(currentZoomRatio = effective) }
+        appendDiagnosticLog("ZOOM", "Optical/Digital Zoom -> ${String.format("%.2fx", effective)}")
     }
 
     fun onViewfinderTapped(x: Float, y: Float) {
@@ -368,6 +445,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 touchExposureEv = it.proSettings.exposureCompensationIndex * it.hardwareCapabilities.exposureStepEv
             )
         }
+        appendDiagnosticLog("AF/AE", "Tap-to-focus locked at (${x.toInt()}, ${y.toInt()})")
         focusDismissJob?.cancel()
         focusDismissJob = viewModelScope.launch {
             delay(3500L)
@@ -386,7 +464,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 proSettings = it.proSettings.copy(exposureCompensationIndex = index)
             )
         }
-        // Extend focus reticle visibility while dragging exposure
         focusDismissJob?.cancel()
         focusDismissJob = viewModelScope.launch {
             delay(3500L)
@@ -413,12 +490,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val next = _uiState.value.proSettings.copy(iso = iso)
         _uiState.update { it.copy(proSettings = next) }
         hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO-ISO", "ISO -> ${next.formattedIso}")
     }
 
     fun updateProShutter(shutterNs: Long?) {
         val next = _uiState.value.proSettings.copy(shutterSpeedNs = shutterNs)
         _uiState.update { it.copy(proSettings = next) }
         hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO-SHUTTER", "Shutter Speed -> ${next.formattedShutter}")
     }
 
     fun updateProWhiteBalance(preset: WhiteBalancePreset, customKelvin: Int = _uiState.value.proSettings.customKelvin) {
@@ -428,12 +507,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         )
         _uiState.update { it.copy(proSettings = next) }
         hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO-WB", "White Balance -> ${next.formattedWb}")
     }
 
     fun updateProManualFocus(focusDist: Float?) {
         val next = _uiState.value.proSettings.copy(manualFocusDistance = focusDist)
         _uiState.update { it.copy(proSettings = next) }
         hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO-FOCUS", "Focus -> ${next.formattedFocus}")
     }
 
     fun updateProExposureIndex(index: Int) {
@@ -442,12 +523,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val next = _uiState.value.proSettings.copy(exposureCompensationIndex = clamped)
         _uiState.update { it.copy(proSettings = next) }
         hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO-EV", "Exposure Index -> $clamped")
     }
 
     fun resetProSettings() {
         val reset = ProCameraSettings()
         _uiState.update { it.copy(proSettings = reset) }
         hardwareController.applyCamera2Parameters(reset, _uiState.value.videoStabilizationEnabled)
+        appendDiagnosticLog("PRO", "Reset all Pro Camera2 parameters to AUTO")
         showStatusBanner("Pro settings reset to Auto")
     }
 
@@ -502,6 +585,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 shutterFlashTriggered = true
             )
         }
+        appendDiagnosticLog(
+            "CAPTURE",
+            "Capturing ${state.photoResolution.shortLabel} | LUT=${state.activeLut.label} | Log=${state.activeLogProfile.shortCode}"
+        )
 
         viewModelScope.launch {
             delay(90L)
@@ -519,6 +606,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         resolution = state.photoResolution,
                         aspectRatio = state.aspectRatio,
                         proSettings = state.proSettings,
+                        activeLut = state.activeLut,
+                        lutIntensity = state.lutIntensity,
+                        activeLogProfile = state.activeLogProfile,
                         aiSceneOptimizerEnabled = state.aiSceneOptimizerEnabled,
                         detectedScene = state.sceneMetrics.detectedScene,
                         portraitBlurStrength = state.portraitBlurStrength,
@@ -527,15 +617,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     _uiState.update { it.copy(isCapturingPhoto = false) }
                     if (savedUri != null) {
+                        appendDiagnosticLog("MEDIASTORE", "Saved ${state.photoResolution.shortLabel} JPEG -> $savedUri")
                         refreshGallery()
-                        showStatusBanner("Saved ${state.activeMode.badgeTitle} (${state.photoResolution.shortLabel})")
+                        showStatusBanner("Saved ${state.photoResolution.shortLabel} (${state.activeLut.label} • ${state.activeLogProfile.shortCode})")
                     } else {
+                        appendDiagnosticLog("ERROR", "Failed saving 4K JPEG to MediaStore")
                         showStatusBanner("Failed to save photo to MediaStore.")
                     }
                 }
             },
             onError = { msg ->
                 _uiState.update { it.copy(isCapturingPhoto = false) }
+                appendDiagnosticLog("ERROR", msg)
                 showStatusBanner(msg)
             }
         )
@@ -548,6 +641,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             hardwareController.startVideoRecording(
                 enableAudio = state.hasAudioPermission,
+                videoBitrateMbps = state.videoBitrateMbps,
+                videoResolution = state.videoResolution,
+                onDiagnosticLog = { tag, msg -> appendDiagnosticLog(tag, msg) },
                 onEvent = { status ->
                     when (status) {
                         is VideoRecordStatus.Recording -> {
@@ -555,7 +651,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                                 it.copy(
                                     isRecordingVideo = true,
                                     isVideoPaused = status.isPaused,
-                                    recordingDurationMs = status.durationNs / 1_000_000L
+                                    recordingDurationMs = status.durationNs / 1_000_000L,
+                                    recordingBytes = status.bytesRecorded
                                 )
                             }
                         }
@@ -564,18 +661,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                                 it.copy(
                                     isRecordingVideo = false,
                                     isVideoPaused = false,
-                                    recordingDurationMs = 0L
+                                    recordingDurationMs = 0L,
+                                    recordingBytes = 0L
                                 )
                             }
                             refreshGallery()
-                            showStatusBanner("Video saved to Gallery (${state.videoResolution.shortLabel})")
+                            showStatusBanner("Saved ${state.videoResolution.shortLabel} @ ${state.videoBitrateMbps} Mbps to Gallery")
                         }
                         is VideoRecordStatus.Error -> {
                             _uiState.update {
                                 it.copy(
                                     isRecordingVideo = false,
                                     isVideoPaused = false,
-                                    recordingDurationMs = 0L
+                                    recordingDurationMs = 0L,
+                                    recordingBytes = 0L
                                 )
                             }
                             showStatusBanner(status.message)
@@ -603,6 +702,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 aiCoachState = AiCoachUiState.Analyzing
             )
         }
+        appendDiagnosticLog("AI-COACH", "Sending frame to Gemini 3.8 Flash Vision Coach...")
         viewModelScope.launch {
             val frame: Bitmap = hardwareController.grabViewfinderBitmap()
                 ?: BitmapFactory.decodeResource(
@@ -618,8 +718,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     currentModeLabel = state.activeMode.badgeTitle,
                     detectedSceneLabel = state.sceneMetrics.detectedScene.displayTitle
                 )
+                appendDiagnosticLog("AI-COACH", "Score=${critique.compositionScore}/100 | ISO=${critique.recommendedIso} | Shutter=${critique.recommendedShutterLabel}")
                 _uiState.update { it.copy(aiCoachState = AiCoachUiState.Success(critique)) }
             } catch (e: Exception) {
+                appendDiagnosticLog("AI-ERROR", e.localizedMessage ?: "AI Coach error")
                 _uiState.update {
                     it.copy(
                         aiCoachState = AiCoachUiState.Error(
@@ -711,7 +813,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         selectedMediaItem = items.firstOrNull()
                     )
                 }
-                showStatusBanner("Imported Flagship Studio Sample Shot")
+                appendDiagnosticLog("SAMPLE", "Imported 4K (3840×2160) Studio Sample Shot")
+                showStatusBanner("Imported 4K (3840×2160) Flagship Studio Sample Shot")
             }
         }
     }
@@ -724,7 +827,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 selectedMediaItem = item,
-                photoEditState = PhotoEditState(),
+                photoEditState = PhotoEditState(
+                    filter = it.activeLut,
+                    logProfile = it.activeLogProfile
+                ),
                 activeScreen = ActiveAppScreen.PHOTO_EDITOR
             )
         }
@@ -736,6 +842,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateEditFilter(filter: PhotoFilterPreset) {
         _uiState.update { it.copy(photoEditState = it.photoEditState.copy(filter = filter)) }
+    }
+
+    fun updateEditLogProfile(logProfile: LogProfile) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(logProfile = logProfile)) }
     }
 
     fun updateEditBrightness(value: Float) {
@@ -799,7 +909,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             if (savedUri != null) {
-                showStatusBanner("Saved high-resolution edited copy to Gallery")
+                appendDiagnosticLog("EDITOR", "Saved 4K LUT/Log edited photo -> $savedUri")
+                showStatusBanner("Saved 4K edited copy to Gallery")
             } else {
                 showStatusBanner("Could not save edited photo.")
             }
@@ -833,7 +944,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun loadPreviewBitmapForEditor(item: MediaItem, onLoaded: (Bitmap?) -> Unit) {
         viewModelScope.launch {
             val bmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                galleryRepository.decodeBitmapFromUri(item.uri, maxDimension = 1440)
+                galleryRepository.decodeBitmapFromUri(item.uri, maxDimension = 1600)
             }
             onLoaded(bmp)
         }

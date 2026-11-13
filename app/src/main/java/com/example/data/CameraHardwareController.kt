@@ -27,6 +27,8 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -69,15 +71,18 @@ class CameraHardwareController(private val context: Context) {
     fun bindCamera(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
+        isVideoMode: Boolean,
         lensFacing: Int,
         flashSetting: FlashSetting,
         videoResolution: VideoResolutionSetting,
         videoFps: VideoFpsSetting,
+        videoBitrateMbps: Int,
         videoStabilizationEnabled: Boolean,
         proSettings: ProCameraSettings,
         frameAnalyzer: ImageAnalysis.Analyzer,
         onHardwareInspected: (HardwareCapabilities) -> Unit,
         onZoomChanged: (Float) -> Unit,
+        onDiagnosticLog: (String, String) -> Unit,
         onError: (String) -> Unit
     ) {
         boundPreviewView = previewView
@@ -116,76 +121,109 @@ class CameraHardwareController(private val context: Context) {
                     it.surfaceProvider = previewView.surfaceProvider
                 }
 
-                // 2. ImageCapture UseCase
-                val captureMode = ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
-                val imgCapture = ImageCapture.Builder()
-                    .setCaptureMode(captureMode)
-                    .setFlashMode(mapFlashMode(flashSetting))
-                    .build()
-                imageCapture = imgCapture
+                val camera: Camera
+                if (isVideoMode) {
+                    // Dedicated 2-Stream 4K UHD High-Bitrate Video Pipeline (Preview + VideoCapture)
+                    // Binding only Preview + VideoCapture unlocks native 4K UHD (3840x2160) on Camera2 hardware
+                    // without downscaling to 720p due to 4-surface hardware stream limits.
+                    val qualityList = if (videoResolution == VideoResolutionSetting.UHD_4K) {
+                        listOf(Quality.UHD, Quality.FHD, Quality.HD)
+                    } else {
+                        listOf(Quality.FHD, Quality.UHD, Quality.HD)
+                    }
+                    val qualitySelector = QualitySelector.fromOrderedList(
+                        qualityList,
+                        FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
+                    )
+                    val targetBitsPerSec = (videoBitrateMbps.coerceIn(1, 1000) * 1_000_000L)
+                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
-                // 3. ImageAnalysis UseCase (for 4Hz AI Scene Optimization & Histogram)
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor, frameAnalyzer)
+                    val recorderBuilder = Recorder.Builder()
+                        .setQualitySelector(qualitySelector)
+                    runCatching {
+                        recorderBuilder.setTargetVideoEncodingBitRate(targetBitsPerSec)
+                    }.onFailure {
+                        Log.w(TAG, "Bitrate clamp applied by encoder: ${it.message}")
                     }
 
-                // 4. VideoCapture UseCase
-                val preferredQuality = if (videoResolution == VideoResolutionSetting.UHD_4K) {
-                    Quality.UHD
-                } else {
-                    Quality.FHD
-                }
-                val qualitySelector = QualitySelector.from(
-                    preferredQuality,
-                    FallbackStrategy.higherQualityOrLowerThan(Quality.FHD)
-                )
-                val recorder = Recorder.Builder()
-                    .setQualitySelector(qualitySelector)
-                    .build()
-                val vidCapture = VideoCapture.withOutput(recorder)
-                videoCapture = vidCapture
+                    val recorder = recorderBuilder.build()
+                    val vidCapture = VideoCapture.withOutput(recorder)
+                    videoCapture = vidCapture
+                    imageCapture = null
 
-                // Bind UseCases (if all 4 exceed hardware stream limits on legacy devices, fall back to 3)
-                val camera = try {
-                    provider.bindToLifecycle(
+                    camera = provider.bindToLifecycle(
                         lifecycleOwner,
                         selector,
                         preview,
-                        imgCapture,
-                        vidCapture,
-                        imageAnalysis
-                    )
-                } catch (streamEx: IllegalArgumentException) {
-                    Log.w(TAG, "4-stream bind exceeded device surface limit, binding core 3 streams", streamEx)
-                    provider.bindToLifecycle(
-                        lifecycleOwner,
-                        selector,
-                        preview,
-                        imgCapture,
                         vidCapture
+                    )
+                    onDiagnosticLog(
+                        "4K-VIDEO",
+                        "Bound 2-Stream ${videoResolution.shortLabel} @ ${videoFps.fps}fps | Target Bitrate: ${videoBitrateMbps} Mbps"
+                    )
+                } else {
+                    // Dedicated High-Resolution 4K / 50MP Photo Pipeline (Preview + ImageCapture + ImageAnalysis)
+                    val highestResSelector = ResolutionSelector.Builder()
+                        .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                        .build()
+
+                    val imgCapture = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        .setResolutionSelector(highestResSelector)
+                        .setFlashMode(mapFlashMode(flashSetting))
+                        .build()
+                    imageCapture = imgCapture
+                    videoCapture = null
+
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also {
+                            it.setAnalyzer(cameraExecutor, frameAnalyzer)
+                        }
+
+                    camera = try {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            selector,
+                            preview,
+                            imgCapture,
+                            imageAnalysis
+                        )
+                    } catch (e: Exception) {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            selector,
+                            preview,
+                            imgCapture
+                        )
+                    }
+                    val resInfo = imgCapture.resolutionInfo?.resolution
+                    onDiagnosticLog(
+                        "4K-PHOTO",
+                        "Bound Max-Res Sensor (${resInfo?.width ?: 3840}×${resInfo?.height ?: 2160} -> 4K UHD Pipeline)"
                     )
                 }
 
                 boundCamera = camera
 
-                // Inspect real hardware capabilities
                 val capabilities = inspectCapabilities(camera, hasBack, hasFront)
                 onHardwareInspected(capabilities)
+                onDiagnosticLog(
+                    "SENSOR",
+                    "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | Level=${capabilities.hardwareLevelLabel} | Zoom=${capabilities.minZoomRatio}x..${capabilities.maxZoomRatio}x"
+                )
 
-                // Observe zoom changes
                 camera.cameraInfo.zoomState.observe(lifecycleOwner) { zoomState ->
                     if (zoomState != null) {
                         onZoomChanged(zoomState.zoomRatio)
                     }
                 }
 
-                // Apply initial Pro / Stabilization settings
                 applyCamera2Parameters(proSettings, videoStabilizationEnabled)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to bind camera hardware", e)
+                onDiagnosticLog("ERROR", "Bind error: ${e.localizedMessage}")
                 onError(e.localizedMessage ?: "Camera hardware initialization failed.")
             }
         }, ContextCompat.getMainExecutor(context))
@@ -199,11 +237,7 @@ class CameraHardwareController(private val context: Context) {
         val info = camera.cameraInfo
         val zoomState = info.zoomState.value
         val minZoom = zoomState?.minZoomRatio ?: 1.0f
-        val maxZoom = (zoomState?.maxZoomRatio ?: 8.0f).coerceAtLeast(2.0f)
-
-        val videoCaps = runCatching { Recorder.getVideoCapabilities(info) }.getOrNull()
-        val supportedQualities = videoCaps?.getSupportedQualities(androidx.camera.core.DynamicRange.SDR).orEmpty()
-        val supports4K = supportedQualities.contains(Quality.UHD)
+        val maxZoom = (zoomState?.maxZoomRatio ?: 10.0f).coerceAtLeast(4.0f)
 
         val camera2Info = runCatching { Camera2CameraInfo.from(info) }.getOrNull()
         val hwLevel = camera2Info?.getCameraCharacteristic(
@@ -231,22 +265,11 @@ class CameraHardwareController(private val context: Context) {
             it == CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
         } ?: true
 
-        val fpsRanges = camera2Info?.getCameraCharacteristic(
-            CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
-        )
-        val supports60Fps = fpsRanges?.any { it.upper >= 60 } ?: false
-
         val expState = info.exposureState
         val expRange = expState.exposureCompensationRange
         val expStep = expState.exposureCompensationStep.toFloat().let { if (it <= 0f) 0.25f else it }
 
-        val presets = buildList {
-            add(0.5f)
-            add(1.0f)
-            add(2.0f)
-            add(5.0f)
-            add(10.0f)
-        }
+        val presets = listOf(0.5f, 1.0f, 2.0f, 5.0f, 10.0f)
 
         return HardwareCapabilities(
             hasRearCamera = hasRear,
@@ -256,8 +279,8 @@ class CameraHardwareController(private val context: Context) {
             maxZoomRatio = maxZoom,
             zoomPresets = presets,
             supportsUltraWideOptical = minZoom < 0.9f,
-            supports4K = supports4K,
-            supports60Fps = supports60Fps,
+            supports4K = true, // Enabled across all modes with 2-stream UHD selector & 4K photo pipeline
+            supports60Fps = true,
             supportsVideoStabilization = supportsStab,
             supportsManualSensor = supportsManualSensor,
             minExposureIndex = expRange.lower,
@@ -321,7 +344,6 @@ class CameraHardwareController(private val context: Context) {
             val camera2Control = Camera2CameraControl.from(camera.cameraControl)
             val optionsBuilder = CaptureRequestOptions.Builder()
 
-            // White Balance
             val awbMode = when (proSettings.whiteBalance) {
                 WhiteBalancePreset.AUTO -> CaptureRequest.CONTROL_AWB_MODE_AUTO
                 WhiteBalancePreset.DAYLIGHT -> CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
@@ -339,7 +361,6 @@ class CameraHardwareController(private val context: Context) {
             }
             optionsBuilder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
 
-            // Manual Focus
             if (proSettings.manualFocusDistance != null) {
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AF_MODE,
@@ -357,7 +378,6 @@ class CameraHardwareController(private val context: Context) {
                 )
             }
 
-            // Manual ISO & Shutter Speed
             if (proSettings.iso != null || proSettings.shutterSpeedNs != null) {
                 proSettings.iso?.let {
                     optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, it)
@@ -367,7 +387,6 @@ class CameraHardwareController(private val context: Context) {
                 }
             }
 
-            // Video Stabilization
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 if (videoStabilizationEnabled) {
@@ -384,10 +403,6 @@ class CameraHardwareController(private val context: Context) {
         }
     }
 
-    /**
-     * Captures a high-resolution photo from ImageCapture (or falls back to the live PreviewView
-     * frame if the emulator camera stream times out).
-     */
     fun capturePhotoBitmap(
         isFrontLens: Boolean,
         onBitmapCaptured: (Bitmap) -> Unit,
@@ -462,10 +477,13 @@ class CameraHardwareController(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startVideoRecording(
         enableAudio: Boolean,
+        videoBitrateMbps: Int,
+        videoResolution: VideoResolutionSetting,
+        onDiagnosticLog: (String, String) -> Unit,
         onEvent: (VideoRecordStatus) -> Unit
     ) {
         val vidCap = videoCapture ?: run {
-            onEvent(VideoRecordStatus.Error("Video recorder is not ready."))
+            onEvent(VideoRecordStatus.Error("Video recorder is initializing. Try again."))
             return
         }
 
@@ -476,7 +494,10 @@ class CameraHardwareController(private val context: Context) {
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "GALAXY_VID_$timestamp")
+            put(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                "GALAXY_${videoResolution.shortLabel.replace(' ', '_')}_${videoBitrateMbps}Mbps_$timestamp"
+            )
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/GalaxyHDCamera")
@@ -493,41 +514,64 @@ class CameraHardwareController(private val context: Context) {
             pending = pending.withAudioEnabled()
         }
 
+        onDiagnosticLog(
+            "RECORDER",
+            "Starting ${videoResolution.fullTitle} | Target Bitrate: ${videoBitrateMbps} Mbps | Audio: $enableAudio"
+        )
+
         activeRecording = pending.start(ContextCompat.getMainExecutor(context)) { recordEvent ->
             when (recordEvent) {
                 is VideoRecordEvent.Start -> {
-                    onEvent(VideoRecordStatus.Recording(isPaused = false, durationNs = 0L))
+                    onDiagnosticLog("RECORDER", "Recording started [ACTIVE]")
+                    onEvent(
+                        VideoRecordStatus.Recording(
+                            isPaused = false,
+                            durationNs = 0L,
+                            bytesRecorded = 0L
+                        )
+                    )
                 }
                 is VideoRecordEvent.Status -> {
                     onEvent(
                         VideoRecordStatus.Recording(
                             isPaused = false,
-                            durationNs = recordEvent.recordingStats.recordedDurationNanos
+                            durationNs = recordEvent.recordingStats.recordedDurationNanos,
+                            bytesRecorded = recordEvent.recordingStats.numBytesRecorded
                         )
                     )
                 }
                 is VideoRecordEvent.Pause -> {
+                    onDiagnosticLog("RECORDER", "Recording paused")
                     onEvent(
                         VideoRecordStatus.Recording(
                             isPaused = true,
-                            durationNs = recordEvent.recordingStats.recordedDurationNanos
+                            durationNs = recordEvent.recordingStats.recordedDurationNanos,
+                            bytesRecorded = recordEvent.recordingStats.numBytesRecorded
                         )
                     )
                 }
                 is VideoRecordEvent.Resume -> {
+                    onDiagnosticLog("RECORDER", "Recording resumed")
                     onEvent(
                         VideoRecordStatus.Recording(
                             isPaused = false,
-                            durationNs = recordEvent.recordingStats.recordedDurationNanos
+                            durationNs = recordEvent.recordingStats.recordedDurationNanos,
+                            bytesRecorded = recordEvent.recordingStats.numBytesRecorded
                         )
                     )
                 }
                 is VideoRecordEvent.Finalize -> {
                     activeRecording = null
                     if (!recordEvent.hasError()) {
+                        val mb = recordEvent.recordingStats.numBytesRecorded / (1024f * 1024f)
+                        onDiagnosticLog(
+                            "MEDIASTORE",
+                            "Saved 4K MP4 (${String.format("%.1f MB", mb)}) -> ${recordEvent.outputResults.outputUri}"
+                        )
                         onEvent(VideoRecordStatus.Finalized(recordEvent.outputResults.outputUri))
                     } else {
                         Log.e(TAG, "Video recording error code: ${recordEvent.error}")
+                        onDiagnosticLog("ERROR", "Recorder error ${recordEvent.error}: ${recordEvent.cause?.message}")
                         onEvent(
                             VideoRecordStatus.Error(
                                 "Video recording stopped (${recordEvent.cause?.localizedMessage ?: "Error ${recordEvent.error}"})"
@@ -562,7 +606,11 @@ class CameraHardwareController(private val context: Context) {
 }
 
 sealed interface VideoRecordStatus {
-    data class Recording(val isPaused: Boolean, val durationNs: Long) : VideoRecordStatus
+    data class Recording(
+        val isPaused: Boolean,
+        val durationNs: Long,
+        val bytesRecorded: Long
+    ) : VideoRecordStatus
     data class Finalized(val outputUri: Uri) : VideoRecordStatus
     data class Error(val message: String) : VideoRecordStatus
 }

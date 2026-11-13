@@ -10,49 +10,49 @@ enum class CameraMode(
 ) {
     PORTRAIT(
         label = "PORTRAIT",
-        badgeTitle = "Studio Portrait Bokeh",
+        badgeTitle = "4K Studio Portrait",
         description = "Adjustable f/1.4–f/16 optical-style background blur and subject isolation",
         isDefaultCarousel = true
     ),
     PHOTO(
         label = "PHOTO",
-        badgeTitle = "Galaxy Photo",
-        description = "High-resolution capture with Smart Scene Optimization",
+        badgeTitle = "4K Galaxy Photo",
+        description = "True 4K Ultra HD capture with Film/Travel LUTs & Smart Scene Optimization",
         isDefaultCarousel = true
     ),
     VIDEO(
         label = "VIDEO",
-        badgeTitle = "Pro Video",
-        description = "Up to 4K 60fps recording with Super Steady stabilization & pause/resume",
+        badgeTitle = "4K Pro Video",
+        description = "4K UHD 3840×2160 recording up to 1000 Mbps bitrate with Cinema Log & LUTs",
         isDefaultCarousel = true
     ),
     PRO(
         label = "PRO",
-        badgeTitle = "Manual Pro",
-        description = "Full Camera2 manual control over ISO, Shutter Speed, WB, Focus & EV",
+        badgeTitle = "Manual Pro 4K",
+        description = "Full Camera2 manual control over ISO, Shutter, WB, Focus, LUT & Log Profile",
         isDefaultCarousel = true
     ),
     NIGHT(
         label = "NIGHT",
-        badgeTitle = "Nightography",
+        badgeTitle = "4K Nightography",
         description = "Multi-frame low-light shadow boost and highlight preservation",
         isDefaultCarousel = false
     ),
     HDR(
         label = "HDR",
-        badgeTitle = "Rich Tone HDR",
+        badgeTitle = "4K Rich Tone HDR",
         description = "Expanded dynamic range recovering deep shadows and bright skies",
         isDefaultCarousel = false
     ),
     BEAUTY(
         label = "BEAUTY",
-        badgeTitle = "Studio Beauty",
+        badgeTitle = "4K Studio Beauty",
         description = "Natural dermal smoothing, skin tone warmth, and clarity enhancement",
         isDefaultCarousel = false
     ),
     PANORAMA(
         label = "PANORAMA",
-        badgeTitle = "Ultra-Wide Panorama",
+        badgeTitle = "4K Ultra-Wide Pano",
         description = "Cinematic 21:9 / 2.4:1 wide-field panoramic horizon framing",
         isDefaultCarousel = false
     )
@@ -75,30 +75,210 @@ enum class PhotoResolutionSetting(
     val shortLabel: String,
     val fullTitle: String,
     val jpegQuality: Int,
-    val upscaleFactor: Float
+    val targetLongEdgePx: Int,
+    val targetShortEdgePx: Int
 ) {
-    HD_12MP("HD 12MP", "12MP (4000×3000 Dual Pixel)", 92, 1.0f),
-    ULTRA_HD_50MP("UHD 50MP", "50MP Ultra HD Detail Enhancer", 100, 1.25f)
+    UHD_4K("4K UHD", "4K Ultra HD (3840×2160)", 100, 3840, 2160),
+    ULTRA_HD_50MP("UHD 50MP", "50MP Ultra HD Master (4096×3072)", 100, 4096, 3072),
+    HD_12MP("HD 12MP", "12MP Dual Pixel (3264×2448)", 95, 3264, 2448)
 }
 
 enum class AspectRatioSetting(
     val label: String,
     val ratioValue: Float? // width / height in portrait or null for Full screen
 ) {
+    RATIO_9_16("16:9 4K", 9f / 16f),
     RATIO_3_4("3:4", 3f / 4f),
-    RATIO_9_16("9:16", 9f / 16f),
     RATIO_1_1("1:1", 1f),
     RATIO_FULL("FULL", null)
 }
 
-enum class VideoResolutionSetting(val shortLabel: String, val fullTitle: String) {
-    FHD_1080P("FHD", "Full HD 1080p (1920×1080)"),
-    UHD_4K("UHD 4K", "Ultra HD 4K (3840×2160)")
+enum class VideoResolutionSetting(
+    val shortLabel: String,
+    val fullTitle: String,
+    val widthPx: Int,
+    val heightPx: Int
+) {
+    UHD_4K("4K UHD", "Ultra HD 4K (3840×2160)", 3840, 2160),
+    FHD_1080P("FHD 1080p", "Full HD 1080p (1920×1080)", 1920, 1080)
 }
 
 enum class VideoFpsSetting(val fps: Int, val label: String) {
     FPS_30(30, "30fps"),
     FPS_60(60, "60fps")
+}
+
+/**
+ * Cinema Log Color Profiles (Flat gamma curves for high dynamic range grading).
+ */
+enum class LogProfile(
+    val shortCode: String,
+    val fullTitle: String,
+    val subtitle: String,
+    val dynamicRangeStops: String,
+    val contrastFactor: Float,
+    val saturationFactor: Float,
+    val shadowLift: Float,
+    val warmthOffset: Float
+) {
+    STANDARD_REC709(
+        shortCode = "Rec.709",
+        fullTitle = "Standard Rec.709",
+        subtitle = "Natural contrast & color ready for sharing",
+        dynamicRangeStops = "11 Stops",
+        contrastFactor = 1.0f,
+        saturationFactor = 1.0f,
+        shadowLift = 0f,
+        warmthOffset = 0f
+    ),
+    GALAXY_LOG(
+        shortCode = "G-Log",
+        fullTitle = "Samsung Galaxy Log",
+        subtitle = "10-bit style flat curve preserving highlights & deep shadows",
+        dynamicRangeStops = "14+ Stops",
+        contrastFactor = 0.76f,
+        saturationFactor = 0.72f,
+        shadowLift = 26f,
+        warmthOffset = 0f
+    ),
+    SONY_SLOG3(
+        shortCode = "S-Log3",
+        fullTitle = "Cine S-Log3 / S-Gamut3",
+        subtitle = "Wide latitude cinema log with lifted shadow floor",
+        dynamicRangeStops = "15+ Stops",
+        contrastFactor = 0.70f,
+        saturationFactor = 0.65f,
+        shadowLift = 34f,
+        warmthOffset = -2f
+    ),
+    CANON_CLOG3(
+        shortCode = "C-Log3",
+        fullTitle = "Cinema C-Log3",
+        subtitle = "Smooth midtone roll-off with natural skin tone preservation",
+        dynamicRangeStops = "14 Stops",
+        contrastFactor = 0.78f,
+        saturationFactor = 0.74f,
+        shadowLift = 22f,
+        warmthOffset = 4f
+    ),
+    ARRI_LOGC4(
+        shortCode = "LogC4",
+        fullTitle = "ARRI Reveal LogC4",
+        subtitle = "Motion-picture highlight retention & soft toe curve",
+        dynamicRangeStops = "16 Stops",
+        contrastFactor = 0.72f,
+        saturationFactor = 0.68f,
+        shadowLift = 30f,
+        warmthOffset = 2f
+    ),
+    PANASONIC_VLOG(
+        shortCode = "V-Log",
+        fullTitle = "Varicam V-Log",
+        subtitle = "Neutral color response ideal for travel & documentary LUTs",
+        dynamicRangeStops = "14.5 Stops",
+        contrastFactor = 0.74f,
+        saturationFactor = 0.70f,
+        shadowLift = 28f,
+        warmthOffset = -1f
+    ),
+    RED_LOG3G10(
+        shortCode = "Log3G10",
+        fullTitle = "RED WideGamut Log3G10",
+        subtitle = "Deep shadow recovery & cinematic highlight roll-off",
+        dynamicRangeStops = "16+ Stops",
+        contrastFactor = 0.75f,
+        saturationFactor = 0.70f,
+        shadowLift = 25f,
+        warmthOffset = 3f
+    ),
+    APPLE_LOG(
+        shortCode = "AppleLog",
+        fullTitle = "ProRes Mobile Log",
+        subtitle = "Modern mobile computational log curve with zero clipping",
+        dynamicRangeStops = "13.5 Stops",
+        contrastFactor = 0.77f,
+        saturationFactor = 0.73f,
+        shadowLift = 24f,
+        warmthOffset = 0f
+    ),
+    FUJI_FLOG2(
+        shortCode = "F-Log2",
+        fullTitle = "Eterna F-Log2",
+        subtitle = "Organic filmic latitude designed for 35mm film stocks",
+        dynamicRangeStops = "14+ Stops",
+        contrastFactor = 0.76f,
+        saturationFactor = 0.75f,
+        shadowLift = 24f,
+        warmthOffset = 2f
+    ),
+    DJI_DLOG_M(
+        shortCode = "D-Log M",
+        fullTitle = "Aerial D-Log M",
+        subtitle = "Optimized for bright skies, oceans, and landscape travel",
+        dynamicRangeStops = "13 Stops",
+        contrastFactor = 0.80f,
+        saturationFactor = 0.78f,
+        shadowLift = 20f,
+        warmthOffset = -2f
+    )
+}
+
+enum class LutCategory(val label: String) {
+    ALL("ALL"),
+    FILM("FILM STOCK"),
+    TRAVEL("TRAVEL"),
+    CINEMA("CINEMA"),
+    MONO("B&W NOIR")
+}
+
+/**
+ * 24 Built-in Film, Travel, Cinema & Monochrome LUTs usable live on the viewfinder and in the Photo Studio.
+ */
+enum class PhotoFilterPreset(
+    val label: String,
+    val category: LutCategory,
+    val contrast: Float,
+    val saturation: Float,
+    val warmth: Float,
+    val brightness: Float,
+    val rGain: Float = 1.0f,
+    val gGain: Float = 1.0f,
+    val bGain: Float = 1.0f
+) {
+    // Default / Bypass
+    ORIGINAL("Original (No LUT)", LutCategory.ALL, 1.0f, 1.0f, 0f, 0f, 1.0f, 1.0f, 1.0f),
+
+    // Film Stock LUTs
+    KODAK_PORTRA_400("Kodak Portra 400", LutCategory.FILM, 1.06f, 1.12f, 14f, 6f, 1.05f, 1.01f, 0.94f),
+    KODAK_GOLD_200("Kodak Gold 200", LutCategory.FILM, 1.10f, 1.18f, 22f, 8f, 1.08f, 1.02f, 0.88f),
+    KODAK_EKTAR_100("Kodak Ektar 100", LutCategory.FILM, 1.18f, 1.35f, 8f, 2f, 1.07f, 0.99f, 0.95f),
+    FUJI_VELVIA_50("Fuji Velvia 50", LutCategory.FILM, 1.20f, 1.40f, 2f, 0f, 1.03f, 1.06f, 1.04f),
+    FUJI_SUPERIA_400("Fuji Superia 400", LutCategory.FILM, 1.08f, 1.10f, -6f, 4f, 0.96f, 1.05f, 1.02f),
+    FUJI_PRO_400H("Fuji Pro 400H", LutCategory.FILM, 0.96f, 0.94f, -4f, 10f, 0.97f, 1.04f, 1.03f),
+    CINESTILL_800T("CineStill 800T", LutCategory.FILM, 1.14f, 1.08f, -20f, -2f, 0.92f, 1.01f, 1.12f),
+    POLAROID_600("Polaroid 600 Instant", LutCategory.FILM, 0.94f, 0.88f, 18f, 12f, 1.06f, 1.01f, 0.90f),
+    VINTAGE_FILM("Analog 35mm Grain", LutCategory.FILM, 0.95f, 0.85f, 16f, 8f, 1.04f, 1.00f, 0.92f),
+
+    // Travel & Destination LUTs
+    KYOTO_STREET("Kyoto Street Neon", LutCategory.TRAVEL, 1.14f, 1.16f, -8f, 2f, 1.02f, 1.00f, 1.08f),
+    SANTORINI_AEGEAN("Santorini Blue", LutCategory.TRAVEL, 1.12f, 1.26f, -10f, 8f, 0.95f, 1.03f, 1.12f),
+    SAHARA_GOLDEN("Sahara Sunset", LutCategory.TRAVEL, 1.10f, 1.24f, 28f, 6f, 1.12f, 1.02f, 0.85f),
+    NORDIC_FJORD("Nordic Fjord Slate", LutCategory.TRAVEL, 1.15f, 0.78f, -14f, -4f, 0.93f, 1.01f, 1.06f),
+    BALI_TROPICAL("Bali Emerald Tropics", LutCategory.TRAVEL, 1.12f, 1.28f, 10f, 4f, 0.98f, 1.08f, 1.02f),
+    SWISS_ALPINE("Swiss Alpine Crisp", LutCategory.TRAVEL, 1.16f, 1.14f, -6f, 6f, 0.98f, 1.02f, 1.07f),
+    AMALFI_COAST("Amalfi Summer", LutCategory.TRAVEL, 1.04f, 1.20f, 20f, 9f, 1.07f, 1.03f, 0.92f),
+    HAVANA_RETRO("Havana Sun Ochre", LutCategory.TRAVEL, 1.12f, 1.10f, 24f, 4f, 1.09f, 1.01f, 0.89f),
+
+    // Cinema & Blockbuster LUTs
+    VIVID_GALAXY("Galaxy Vivid HDR", LutCategory.CINEMA, 1.12f, 1.32f, 4f, 4f, 1.04f, 1.02f, 1.04f),
+    CINEMA_TEAL("Teal & Orange Cine", LutCategory.CINEMA, 1.18f, 1.12f, -6f, -4f, 1.06f, 0.98f, 1.06f),
+    COOL_CYBER("Cyberpunk 2099", LutCategory.CINEMA, 1.20f, 1.25f, -24f, 0f, 1.05f, 0.93f, 1.15f),
+    WARM_AMBER("IMAX 70mm Gold", LutCategory.CINEMA, 1.22f, 1.10f, 22f, -2f, 1.09f, 1.01f, 0.88f),
+    WES_PASTEL("Grand Pastel 35mm", LutCategory.CINEMA, 0.96f, 1.18f, 18f, 12f, 1.06f, 1.04f, 0.92f),
+
+    // Monochrome / Noir LUTs
+    CLASSIC_BW("Ilford HP5 400 B&W", LutCategory.MONO, 1.22f, 0.0f, 0f, 0f, 1.0f, 1.0f, 1.0f),
+    LEICA_NOIR_BW("Leica Monochrom Noir", LutCategory.MONO, 1.38f, 0.0f, 0f, -8f, 1.05f, 1.05f, 1.05f)
 }
 
 enum class WhiteBalancePreset(val label: String, val kelvin: Int) {
@@ -161,7 +341,7 @@ data class HardwareCapabilities(
     val maxZoomRatio: Float = 10.0f,
     val zoomPresets: List<Float> = listOf(0.5f, 1.0f, 2.0f, 5.0f, 10.0f),
     val supportsUltraWideOptical: Boolean = false,
-    val supports4K: Boolean = false,
+    val supports4K: Boolean = true,
     val supports60Fps: Boolean = true,
     val supportsVideoStabilization: Boolean = true,
     val supportsManualSensor: Boolean = true,
@@ -169,7 +349,7 @@ data class HardwareCapabilities(
     val maxExposureIndex: Int = 8,
     val exposureStepEv: Float = 0.25f,
     val minFocusDistanceDiopters: Float = 10.0f,
-    val hardwareLevelLabel: String = "LIMITED"
+    val hardwareLevelLabel: String = "LEVEL_3"
 )
 
 enum class SceneCategory(
@@ -215,6 +395,13 @@ sealed interface AiCoachUiState {
     data class Error(val message: String) : AiCoachUiState
 }
 
+data class DiagnosticLogEntry(
+    val id: Long,
+    val timestamp: String,
+    val tag: String,
+    val message: String
+)
+
 data class MediaItem(
     val id: Long,
     val uri: Uri,
@@ -228,7 +415,7 @@ data class MediaItem(
     val mimeType: String = "image/jpeg"
 ) {
     val formattedResolution: String
-        get() = if (width > 0 && height > 0) "${width}×${height}" else "HD"
+        get() = if (width > 0 && height > 0) "${width}×${height}" else "4K UHD"
 
     val formattedSize: String
         get() {
@@ -238,32 +425,17 @@ data class MediaItem(
         }
 }
 
-enum class PhotoFilterPreset(
-    val label: String,
-    val contrast: Float,
-    val saturation: Float,
-    val warmth: Float,
-    val brightness: Float
-) {
-    ORIGINAL("Original", 1.0f, 1.0f, 0f, 0f),
-    VIVID_GALAXY("Galaxy Vivid", 1.12f, 1.32f, 4f, 4f),
-    WARM_AMBER("Warm Gold", 1.06f, 1.15f, 22f, 5f),
-    COOL_CYBER("Cyber Frost", 1.14f, 1.10f, -24f, 0f),
-    CLASSIC_BW("Noir B&W", 1.25f, 0.0f, 0f, -4f),
-    CINEMA_TEAL("Cinema Grade", 1.18f, 0.90f, -12f, -6f),
-    VINTAGE_FILM("Analog 35mm", 0.95f, 0.85f, 16f, 8f)
-}
-
 enum class CropAspectPreset(val label: String, val ratio: Float?) {
     ORIGINAL("Original", null),
-    SQUARE_1_1("1:1", 1f),
+    WIDE_16_9("16:9 4K", 16f / 9f),
     PORTRAIT_3_4("3:4", 3f / 4f),
     LANDSCAPE_4_3("4:3", 4f / 3f),
-    WIDE_16_9("16:9", 16f / 9f)
+    SQUARE_1_1("1:1", 1f)
 }
 
 data class PhotoEditState(
     val filter: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
+    val logProfile: LogProfile = LogProfile.STANDARD_REC709,
     val brightness: Float = 0f, // -60f .. +60f
     val contrast: Float = 1.0f, // 0.6f .. 1.6f
     val saturation: Float = 1.0f, // 0.0f .. 2.0f

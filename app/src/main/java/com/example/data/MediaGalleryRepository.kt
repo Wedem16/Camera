@@ -26,8 +26,10 @@ import com.example.R
 import com.example.model.AspectRatioSetting
 import com.example.model.CameraMode
 import com.example.model.CropAspectPreset
+import com.example.model.LogProfile
 import com.example.model.MediaItem
 import com.example.model.PhotoEditState
+import com.example.model.PhotoFilterPreset
 import com.example.model.PhotoResolutionSetting
 import com.example.model.ProCameraSettings
 import com.example.model.SceneCategory
@@ -37,6 +39,7 @@ import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 import kotlin.math.min
 
 private const val TAG = "MediaGalleryRepo"
@@ -156,8 +159,9 @@ class MediaGalleryRepository(private val context: Context) {
     }
 
     /**
-     * Processes a captured camera Bitmap according to the active CameraMode, AspectRatio,
-     * PhotoResolutionSetting, ProCameraSettings, and AI Scene Optimizer, then saves it to MediaStore.
+     * Processes a captured camera Bitmap according to the active CameraMode, 4K/50MP Resolution,
+     * active Film/Travel LUT, Cinema Log Profile, ProCameraSettings, and AI Scene Optimizer,
+     * then writes a full 4K Ultra HD JPEG to MediaStore.
      */
     suspend fun processAndSaveCapturedPhoto(
         rawBitmap: Bitmap,
@@ -165,6 +169,9 @@ class MediaGalleryRepository(private val context: Context) {
         resolution: PhotoResolutionSetting,
         aspectRatio: AspectRatioSetting,
         proSettings: ProCameraSettings,
+        activeLut: PhotoFilterPreset,
+        lutIntensity: Float,
+        activeLogProfile: LogProfile,
         aiSceneOptimizerEnabled: Boolean,
         detectedScene: SceneCategory,
         portraitBlurStrength: Float,
@@ -172,63 +179,68 @@ class MediaGalleryRepository(private val context: Context) {
         addWatermark: Boolean
     ): Uri? = withContext(Dispatchers.IO) {
         try {
-            // 1. Crop to selected aspect ratio (or 2.4:1 panoramic strip in PANORAMA mode)
+            // 1. Crop to selected aspect ratio (or 2.35:1 panoramic strip in PANORAMA mode)
             val targetRatio = if (mode == CameraMode.PANORAMA) {
-                2.35f // Wide panoramic aspect
+                2.35f
             } else {
                 aspectRatio.ratioValue
             }
             val cropped = cropBitmapToRatio(rawBitmap, targetRatio, isPanorama = mode == CameraMode.PANORAMA)
 
-            // 2. Apply Ultra HD resolution scaling if selected
-            val scaled = if (resolution == PhotoResolutionSetting.ULTRA_HD_50MP &&
-                cropped.width < 3200 && cropped.height < 3200
-            ) {
-                val newW = (cropped.width * resolution.upscaleFactor).toInt()
-                val newH = (cropped.height * resolution.upscaleFactor).toInt()
+            // 2. Guarantee True 4K UHD (3840×2160) or 50MP Master resolution
+            val targetLong = resolution.targetLongEdgePx
+            val currentLong = max(cropped.width, cropped.height).coerceAtLeast(1)
+            val scaled = if (currentLong < targetLong) {
+                val scaleFactor = targetLong.toFloat() / currentLong.toFloat()
+                val newW = (cropped.width * scaleFactor).toInt().coerceAtLeast(1)
+                val newH = (cropped.height * scaleFactor).toInt().coerceAtLeast(1)
                 Bitmap.createScaledBitmap(cropped, newW, newH, true)
             } else {
                 cropped
             }
 
-            // 3. Apply computational mode & AI scene tone mapping
+            // 3. Apply computational mode, LUT, Cinema Log curve, and AI scene tone mapping
             val processed = applyComputationalModeEffects(
                 source = scaled,
                 mode = mode,
                 proSettings = proSettings,
+                activeLut = activeLut,
+                lutIntensity = lutIntensity,
+                activeLogProfile = activeLogProfile,
                 aiSceneOptimizerEnabled = aiSceneOptimizerEnabled,
                 detectedScene = detectedScene,
                 portraitBlurStrength = portraitBlurStrength,
                 beautySmoothness = beautySmoothness,
                 addWatermark = addWatermark,
-                resolutionLabel = resolution.shortLabel
+                resolutionLabel = "${scaled.width}×${scaled.height} (${resolution.shortLabel})"
             )
 
             // 4. Write to MediaStore
             saveBitmapToMediaStore(
                 bitmap = processed,
-                prefix = "GALAXY_${mode.name}",
+                prefix = "GALAXY_4K_${mode.name}",
                 jpegQuality = resolution.jpegQuality
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to process and save photo", e)
+            Log.e(TAG, "Failed to process and save 4K photo", e)
             null
         }
     }
 
     /**
-     * Imports a studio sample photo from our bundled flagship camera drawable so users can test
-     * the Photo Editor and filters immediately even before taking photos.
+     * Imports a 4K studio sample photo from our bundled flagship camera drawable so users can test
+     * the Photo Editor, Film/Travel LUTs, and Log profiles immediately.
      */
     suspend fun createStudioSamplePhoto(): Uri? = withContext(Dispatchers.IO) {
         try {
-            val sampleBitmap = BitmapFactory.decodeResource(
+            val rawSample = BitmapFactory.decodeResource(
                 context.resources,
                 R.drawable.img_camera_hero_lens_1794590959493
             ) ?: return@withContext null
+            val sample4K = Bitmap.createScaledBitmap(rawSample, 3840, 2160, true)
             saveBitmapToMediaStore(
-                bitmap = sampleBitmap,
-                prefix = "GALAXY_STUDIO_SAMPLE",
+                bitmap = sample4K,
+                prefix = "GALAXY_4K_STUDIO_SAMPLE",
                 jpegQuality = 100
             )
         } catch (e: Exception) {
@@ -238,20 +250,20 @@ class MediaGalleryRepository(private val context: Context) {
     }
 
     /**
-     * Renders non-destructive photo edits (Filter preset, Brightness, Contrast, Saturation,
-     * Warmth, Vignette, Rotation, Aspect Crop, and Galaxy EXIF Watermark) onto the bitmap
-     * and saves a new high-resolution copy in MediaStore.
+     * Renders non-destructive photo edits (Film/Travel LUT, Cinema Log Profile, Brightness,
+     * Contrast, Saturation, Warmth, Vignette, Rotation, Aspect Crop, and Galaxy EXIF Watermark)
+     * and saves a new 4K copy in MediaStore.
      */
     suspend fun saveEditedPhoto(
         sourceUri: Uri,
         editState: PhotoEditState
     ): Uri? = withContext(Dispatchers.IO) {
         try {
-            val originalBitmap = decodeBitmapFromUri(sourceUri) ?: return@withContext null
+            val originalBitmap = decodeBitmapFromUri(sourceUri, maxDimension = 3840) ?: return@withContext null
             val rendered = renderPhotoEdits(originalBitmap, editState)
             saveBitmapToMediaStore(
                 bitmap = rendered,
-                prefix = "GALAXY_EDIT",
+                prefix = "GALAXY_4K_LUT_${editState.filter.name}",
                 jpegQuality = 100
             )
         } catch (e: Exception) {
@@ -260,7 +272,7 @@ class MediaGalleryRepository(private val context: Context) {
         }
     }
 
-    fun decodeBitmapFromUri(uri: Uri, maxDimension: Int = 2560): Bitmap? {
+    fun decodeBitmapFromUri(uri: Uri, maxDimension: Int = 3840): Bitmap? {
         return try {
             val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             contentResolver.openInputStream(uri)?.use {
@@ -305,7 +317,7 @@ class MediaGalleryRepository(private val context: Context) {
             rotated
         }
 
-        // 3. ColorMatrix (Filter + Sliders)
+        // 3. ColorMatrix (LUT + Log Profile + Sliders)
         val outBitmap = Bitmap.createBitmap(
             cropped.width.coerceAtLeast(1),
             cropped.height.coerceAtLeast(1),
@@ -313,16 +325,14 @@ class MediaGalleryRepository(private val context: Context) {
         )
         val canvas = Canvas(outBitmap)
 
-        val totalContrast = (editState.filter.contrast * editState.contrast).coerceIn(0.4f, 2.2f)
-        val totalSaturation = (editState.filter.saturation * editState.saturation).coerceIn(0f, 2.5f)
-        val totalBrightness = (editState.filter.brightness + editState.brightness).coerceIn(-100f, 100f)
-        val totalWarmth = (editState.filter.warmth + editState.warmth).coerceIn(-60f, 60f)
-
         val colorMatrix = buildCombinedColorMatrix(
-            contrast = totalContrast,
-            saturation = totalSaturation,
-            brightness = totalBrightness,
-            warmth = totalWarmth
+            lut = editState.filter,
+            lutIntensity = 1.0f,
+            logProfile = editState.logProfile,
+            extraContrast = editState.contrast,
+            extraSaturation = editState.saturation,
+            extraBrightness = editState.brightness,
+            extraWarmth = editState.warmth
         )
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(colorMatrix)
@@ -340,7 +350,7 @@ class MediaGalleryRepository(private val context: Context) {
                 canvas = canvas,
                 width = outBitmap.width.toFloat(),
                 height = outBitmap.height.toFloat(),
-                subtitle = "Galaxy HD Studio • ${editState.filter.label} • Pro Color Engine"
+                subtitle = "Galaxy 4K Studio • LUT: ${editState.filter.label} • ${editState.logProfile.shortCode}"
             )
         }
 
@@ -377,6 +387,9 @@ class MediaGalleryRepository(private val context: Context) {
         source: Bitmap,
         mode: CameraMode,
         proSettings: ProCameraSettings,
+        activeLut: PhotoFilterPreset,
+        lutIntensity: Float,
+        activeLogProfile: LogProfile,
         aiSceneOptimizerEnabled: Boolean,
         detectedScene: SceneCategory,
         portraitBlurStrength: Float,
@@ -432,10 +445,13 @@ class MediaGalleryRepository(private val context: Context) {
         }
 
         val matrix = buildCombinedColorMatrix(
-            contrast = contrast,
-            saturation = saturation,
-            brightness = brightness,
-            warmth = warmth
+            lut = activeLut,
+            lutIntensity = lutIntensity,
+            logProfile = activeLogProfile,
+            extraContrast = contrast,
+            extraSaturation = saturation,
+            extraBrightness = brightness,
+            extraWarmth = warmth
         )
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(matrix)
@@ -444,9 +460,8 @@ class MediaGalleryRepository(private val context: Context) {
 
         // Mode-specific optical effects
         if (mode == CameraMode.PORTRAIT && portraitBlurStrength > 0.05f) {
-            // Create a fast downscaled blurred layer and composite around subject center
-            val downW = (width / 10).coerceAtLeast(16)
-            val downH = (height / 10).coerceAtLeast(16)
+            val downW = (width / 12).coerceAtLeast(16)
+            val downH = (height / 12).coerceAtLeast(16)
             val tiny = Bitmap.createScaledBitmap(result, downW, downH, true)
             val blurredBg = Bitmap.createScaledBitmap(tiny, width, height, true)
 
@@ -454,7 +469,6 @@ class MediaGalleryRepository(private val context: Context) {
             val centerCanvas = Canvas(center)
             centerCanvas.drawBitmap(blurredBg, 0f, 0f, null)
 
-            // Draw sharp center oval over blurred periphery
             val sharpShader = android.graphics.BitmapShader(
                 result,
                 Shader.TileMode.CLAMP,
@@ -474,44 +488,21 @@ class MediaGalleryRepository(private val context: Context) {
 
             canvas.drawBitmap(center, 0f, 0f, null)
         } else if (mode == CameraMode.NIGHT || mode == CameraMode.HDR) {
-            drawVignetteOverlay(canvas, width.toFloat(), height.toFloat(), 0.22f)
+            drawVignetteOverlay(canvas, width.toFloat(), height.toFloat(), 0.20f)
         }
 
         if (addWatermark) {
+            val lutPart = if (activeLut != PhotoFilterPreset.ORIGINAL) " • LUT: ${activeLut.label}" else ""
+            val logPart = if (activeLogProfile != LogProfile.STANDARD_REC709) " • ${activeLogProfile.shortCode}" else ""
             val telemetry = if (mode == CameraMode.PRO) {
-                "ISO ${proSettings.formattedIso} • ${proSettings.formattedShutter} • ${proSettings.formattedWb}"
+                "$resolutionLabel • ISO ${proSettings.formattedIso} • ${proSettings.formattedShutter} • ${proSettings.formattedWb}$lutPart$logPart"
             } else {
-                "${mode.badgeTitle} • $resolutionLabel • ${detectedScene.displayTitle}"
+                "${mode.badgeTitle} • $resolutionLabel$lutPart$logPart"
             }
             drawGalaxyWatermark(canvas, width.toFloat(), height.toFloat(), telemetry)
         }
 
         return result
-    }
-
-    private fun buildCombinedColorMatrix(
-        contrast: Float,
-        saturation: Float,
-        brightness: Float,
-        warmth: Float
-    ): ColorMatrix {
-        val cm = ColorMatrix()
-        cm.setSaturation(saturation)
-
-        val translate = (0.5f * (1.0f - contrast) * 255f) + brightness
-        val rWarm = warmth * 1.1f
-        val bCool = -warmth * 1.1f
-
-        val contrastWarmthMatrix = ColorMatrix(
-            floatArrayOf(
-                contrast, 0f, 0f, 0f, translate + rWarm,
-                0f, contrast, 0f, 0f, translate + (warmth * 0.25f),
-                0f, 0f, contrast, 0f, translate + bCool,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-        cm.postConcat(contrastWarmthMatrix)
-        return cm
     }
 
     private fun drawVignetteOverlay(
@@ -554,7 +545,7 @@ class MediaGalleryRepository(private val context: Context) {
         canvas.drawRect(0f, barTop, width, height, bgPaint)
 
         val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(255, 214, 10) // Galaxy Amber
+            color = Color.rgb(255, 214, 10)
         }
         val padding = barHeight * 0.25f
         canvas.drawRect(padding, barTop + padding, padding + 6f, height - padding, accentPaint)
@@ -571,7 +562,7 @@ class MediaGalleryRepository(private val context: Context) {
         }
 
         val textX = padding + 20f
-        canvas.drawText("GALAXY HD CAMERA", textX, barTop + barHeight * 0.46f, titlePaint)
+        canvas.drawText("GALAXY HD CAMERA 4K", textX, barTop + barHeight * 0.46f, titlePaint)
         canvas.drawText(subtitle, textX, barTop + barHeight * 0.80f, subPaint)
     }
 
@@ -585,14 +576,11 @@ class MediaGalleryRepository(private val context: Context) {
         val srcH = source.height
         if (srcW <= 0 || srcH <= 0) return source
 
-        // For Panorama, always crop to wide horizontal strip (width / height = 2.35)
         val desiredRatio = if (isPanorama) {
             2.35f
         } else if (srcH >= srcW) {
-            // Portrait image
             if (targetRatio <= 1f) targetRatio else 1f / targetRatio
         } else {
-            // Landscape image
             if (targetRatio >= 1f) targetRatio else 1f / targetRatio
         }
 
@@ -654,6 +642,55 @@ class MediaGalleryRepository(private val context: Context) {
             return null
         } finally {
             outputStream?.close()
+        }
+    }
+
+    companion object {
+        /**
+         * Builds an Android ColorMatrix combining a Film/Travel/Cinema LUT, a Cinema Log Profile,
+         * and fine adjustment multipliers.
+         */
+        fun buildCombinedColorMatrix(
+            lut: PhotoFilterPreset,
+            lutIntensity: Float = 1.0f,
+            logProfile: LogProfile = LogProfile.STANDARD_REC709,
+            extraContrast: Float = 1.0f,
+            extraSaturation: Float = 1.0f,
+            extraBrightness: Float = 0f,
+            extraWarmth: Float = 0f
+        ): ColorMatrix {
+            val blend = lutIntensity.coerceIn(0f, 1f)
+
+            val lutContrast = 1.0f + (lut.contrast - 1.0f) * blend
+            val lutSat = 1.0f + (lut.saturation - 1.0f) * blend
+            val lutWarmth = lut.warmth * blend
+            val lutBrightness = lut.brightness * blend
+            val rGain = 1.0f + (lut.rGain - 1.0f) * blend
+            val gGain = 1.0f + (lut.gGain - 1.0f) * blend
+            val bGain = 1.0f + (lut.bGain - 1.0f) * blend
+
+            val totalContrast = (lutContrast * logProfile.contrastFactor * extraContrast).coerceIn(0.35f, 2.4f)
+            val totalSaturation = (lutSat * logProfile.saturationFactor * extraSaturation).coerceIn(0f, 2.6f)
+            val totalBrightness = (lutBrightness + logProfile.shadowLift + extraBrightness).coerceIn(-100f, 100f)
+            val totalWarmth = (lutWarmth + logProfile.warmthOffset + extraWarmth).coerceIn(-70f, 70f)
+
+            val cm = ColorMatrix()
+            cm.setSaturation(totalSaturation)
+
+            val translate = (0.5f * (1.0f - totalContrast) * 255f) + totalBrightness
+            val rWarm = totalWarmth * 1.15f
+            val bCool = -totalWarmth * 1.15f
+
+            val gradeMatrix = ColorMatrix(
+                floatArrayOf(
+                    totalContrast * rGain, 0f, 0f, 0f, translate + rWarm,
+                    0f, totalContrast * gGain, 0f, 0f, translate + (totalWarmth * 0.22f),
+                    0f, 0f, totalContrast * bGain, 0f, translate + bCool,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+            cm.postConcat(gradeMatrix)
+            return cm
         }
     }
 }

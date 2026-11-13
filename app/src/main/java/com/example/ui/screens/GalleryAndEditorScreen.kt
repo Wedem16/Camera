@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.CropRotate
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -75,6 +76,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.model.CropAspectPreset
+import com.example.model.LogProfile
+import com.example.model.LutCategory
 import com.example.model.MediaItem
 import com.example.model.PhotoEditState
 import com.example.model.PhotoFilterPreset
@@ -113,7 +116,6 @@ fun GalleryScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // Top Header Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -159,7 +161,7 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Sample Shot",
+                    text = "4K Sample",
                     style = MaterialTheme.typography.labelMedium,
                     color = GalaxyAmber
                 )
@@ -167,7 +169,6 @@ fun GalleryScreen(
         }
 
         if (state.mediaList.isEmpty() || selected == null) {
-            // Empty Gallery State with Flagship Visual Asset
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -188,13 +189,13 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.height(20.dp))
                 Text(
-                    text = "Your Galaxy Studio Gallery is Empty",
+                    text = "Your Galaxy 4K Studio Gallery is Empty",
                     style = MaterialTheme.typography.titleLarge,
                     color = TextPrimaryWhite
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Capture high-resolution photos or 4K videos in the viewfinder, or load a Studio Sample Shot to test the built-in Pro Photo Editor.",
+                    text = "Capture 4K photos or 1000 Mbps 4K videos in the viewfinder, or load a 4K Studio Sample Shot to test the 24 Film/Travel LUTs & 10 Cinema Log curves.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondaryZinc
                 )
@@ -214,12 +215,11 @@ fun GalleryScreen(
                         onClick = onImportSamplePhoto,
                         modifier = Modifier.testTag("empty_gallery_load_sample")
                     ) {
-                        Text("Load Studio Sample", color = GalaxyAmber)
+                        Text("Load 4K Sample", color = GalaxyAmber)
                     }
                 }
             }
         } else {
-            // Main Media Viewer Stage
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -260,7 +260,6 @@ fun GalleryScreen(
                     )
                 }
 
-                // Floating EXIF / Media Metadata Badge
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -281,7 +280,7 @@ fun GalleryScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${if (selected.isVideo) "VIDEO MP4" else "PHOTO JPEG"} • ${selected.formattedResolution} • ${selected.formattedSize}",
+                            text = "${if (selected.isVideo) "VIDEO MP4" else "PHOTO 4K JPEG"} • ${selected.formattedResolution} • ${selected.formattedSize}",
                             style = MaterialTheme.typography.labelSmall,
                             color = GalaxyAmber
                         )
@@ -289,7 +288,6 @@ fun GalleryScreen(
                 }
             }
 
-            // Filmstrip Thumbnail Strip
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -330,7 +328,6 @@ fun GalleryScreen(
                 }
             }
 
-            // Bottom Action Bar (Edit, Share, Delete)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -342,7 +339,7 @@ fun GalleryScreen(
                 if (!selected.isVideo) {
                     GalleryActionButton(
                         icon = Icons.Default.Edit,
-                        label = "Edit Photo",
+                        label = "Edit & LUTs",
                         accent = GalaxyAmber,
                         onClick = { onOpenEditor(selected) },
                         testTag = "gallery_edit_button"
@@ -400,7 +397,8 @@ private fun GalleryActionButton(
 }
 
 private enum class EditorToolTab {
-    FILTERS,
+    LUTS,
+    LOG_CURVE,
     ADJUST,
     CROP_STAMP
 }
@@ -416,7 +414,8 @@ fun PhotoEditorScreen(
     val mediaItem = state.selectedMediaItem ?: return
     val editState: PhotoEditState = state.photoEditState
 
-    var activeToolTab by remember { mutableStateOf(EditorToolTab.FILTERS) }
+    var activeToolTab by remember { mutableStateOf(EditorToolTab.LUTS) }
+    var selectedCategory by remember { mutableStateOf(LutCategory.ALL) }
     var sourceBitmap by remember(mediaItem.uri) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(mediaItem.uri) {
@@ -429,6 +428,16 @@ fun PhotoEditorScreen(
         sourceBitmap?.let { viewModel.renderPreviewWithEdits(it, editState) }
     }
 
+    val displayedLuts = remember(selectedCategory) {
+        if (selectedCategory == LutCategory.ALL) {
+            PhotoFilterPreset.entries
+        } else {
+            PhotoFilterPreset.entries.filter {
+                it == PhotoFilterPreset.ORIGINAL || it.category == selectedCategory
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -436,7 +445,6 @@ fun PhotoEditorScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // Top Studio Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -463,7 +471,7 @@ fun PhotoEditorScreen(
                         color = TextPrimaryWhite
                     )
                     Text(
-                        text = "${editState.filter.label} • ${editState.cropAspect.label}",
+                        text = "${editState.filter.label} • ${editState.logProfile.shortCode} • ${editState.cropAspect.label}",
                         style = MaterialTheme.typography.labelSmall,
                         color = GalaxyAmber
                     )
@@ -508,12 +516,11 @@ fun PhotoEditorScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save Copy", fontWeight = FontWeight.Bold)
+                    Text("Save 4K", fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        // Live Edited Preview Canvas
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -535,7 +542,6 @@ fun PhotoEditorScreen(
             }
         }
 
-        // Editor Tool Controls Deck
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -543,36 +549,102 @@ fun PhotoEditorScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             when (activeToolTab) {
-                EditorToolTab.FILTERS -> {
+                EditorToolTab.LUTS -> {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            LutCategory.entries.forEach { cat ->
+                                val isCat = selectedCategory == cat
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (isCat) AiCyan else ObsidianElevated)
+                                        .clickable { selectedCategory = cat }
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = cat.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCat) AmoledBlack else TextPrimaryWhite
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            displayedLuts.forEach { preset ->
+                                val selected = editState.filter == preset
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(if (selected) GalaxyAmber else ObsidianElevated)
+                                        .clickable { viewModel.updateEditFilter(preset) }
+                                        .minimumInteractiveComponentSize()
+                                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                                        .testTag("editor_filter_${preset.name.lowercase()}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FilterVintage,
+                                        contentDescription = preset.label,
+                                        tint = if (selected) AmoledBlack else GalaxyAmber,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = preset.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (selected) AmoledBlack else TextPrimaryWhite
+                                    )
+                                    Text(
+                                        text = preset.category.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (selected) AmoledBlack.copy(alpha = 0.75f) else TextSecondaryZinc
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                EditorToolTab.LOG_CURVE -> {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        PhotoFilterPreset.entries.forEach { preset ->
-                            val selected = editState.filter == preset
+                        LogProfile.entries.forEach { logProfile ->
+                            val selected = editState.logProfile == logProfile
                             Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(14.dp))
-                                    .background(if (selected) GalaxyAmber else ObsidianElevated)
-                                    .clickable { viewModel.updateEditFilter(preset) }
+                                    .background(if (selected) AiCyan else ObsidianElevated)
+                                    .clickable { viewModel.updateEditLogProfile(logProfile) }
                                     .minimumInteractiveComponentSize()
-                                    .padding(horizontal = 16.dp, vertical = 10.dp)
-                                    .testTag("editor_filter_${preset.name.lowercase()}")
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    .testTag("editor_log_${logProfile.name.lowercase()}")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.FilterVintage,
-                                    contentDescription = preset.label,
-                                    tint = if (selected) AmoledBlack else GalaxyAmber,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = preset.label,
+                                    text = "${logProfile.shortCode} (${logProfile.dynamicRangeStops})",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
+                                    color = if (selected) AmoledBlack else AiCyan
+                                )
+                                Text(
+                                    text = logProfile.fullTitle,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = if (selected) AmoledBlack else TextPrimaryWhite
                                 )
                             }
@@ -676,12 +748,12 @@ fun PhotoEditorScreen(
                         ) {
                             Column {
                                 Text(
-                                    text = "Galaxy Flagship EXIF Watermark",
+                                    text = "Galaxy 4K EXIF Watermark",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = TextPrimaryWhite
                                 )
                                 Text(
-                                    text = "Render signature bottom metadata bar",
+                                    text = "Render signature bottom metadata bar with LUT & Log",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = TextSecondaryZinc
                                 )
@@ -702,7 +774,6 @@ fun PhotoEditorScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Bottom Tool Selector Tabs
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -713,10 +784,17 @@ fun PhotoEditorScreen(
             ) {
                 EditorTabPill(
                     icon = Icons.Default.AutoFixHigh,
-                    label = "FILTERS",
-                    selected = activeToolTab == EditorToolTab.FILTERS,
-                    onClick = { activeToolTab = EditorToolTab.FILTERS },
+                    label = "24 LUTS",
+                    selected = activeToolTab == EditorToolTab.LUTS,
+                    onClick = { activeToolTab = EditorToolTab.LUTS },
                     testTag = "editor_tab_filters"
+                )
+                EditorTabPill(
+                    icon = Icons.Default.ColorLens,
+                    label = "10 LOGS",
+                    selected = activeToolTab == EditorToolTab.LOG_CURVE,
+                    onClick = { activeToolTab = EditorToolTab.LOG_CURVE },
+                    testTag = "editor_tab_logs"
                 )
                 EditorTabPill(
                     icon = Icons.Default.Tune,
@@ -727,7 +805,7 @@ fun PhotoEditorScreen(
                 )
                 EditorTabPill(
                     icon = Icons.Default.CropRotate,
-                    label = "CROP & STAMP",
+                    label = "CROP",
                     selected = activeToolTab == EditorToolTab.CROP_STAMP,
                     onClick = { activeToolTab = EditorToolTab.CROP_STAMP },
                     testTag = "editor_tab_crop"
@@ -790,16 +868,16 @@ private fun EditorTabPill(
             .background(if (selected) GalaxyAmber else AmoledBlack.copy(alpha = 0f))
             .clickable(onClick = onClick)
             .minimumInteractiveComponentSize()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
             .testTag(testTag)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = label,
             tint = if (selected) AmoledBlack else TextSecondaryZinc,
-            modifier = Modifier.size(16.dp)
+            modifier = Modifier.size(15.dp)
         )
-        Spacer(modifier = Modifier.width(6.dp))
+        Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelLarge,
