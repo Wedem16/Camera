@@ -72,6 +72,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.R
@@ -94,6 +95,7 @@ import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
 import com.example.viewmodel.CameraUiState
 import com.example.viewmodel.CameraViewModel
+import java.util.Locale
 
 @Composable
 fun GalleryScreen(
@@ -142,7 +144,7 @@ fun GalleryScreen(
                         color = TextPrimaryWhite
                     )
                     Text(
-                        text = "${state.mediaList.size} items in Android MediaStore",
+                        text = "${state.mediaList.size} items in Pictures/Camera (MediaStore)",
                         style = MaterialTheme.typography.labelSmall,
                         color = GalaxyAmber
                     )
@@ -161,7 +163,7 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "4K Sample",
+                    text = "Sample Shot",
                     style = MaterialTheme.typography.labelMedium,
                     color = GalaxyAmber
                 )
@@ -179,7 +181,7 @@ fun GalleryScreen(
             ) {
                 Image(
                     painter = painterResource(id = R.drawable.img_camera_hero_lens_1794590959493),
-                    contentDescription = "Galaxy Studio",
+                    contentDescription = "Camera Gallery",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -189,13 +191,13 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.height(20.dp))
                 Text(
-                    text = "Your Galaxy 4K Studio Gallery is Empty",
+                    text = "No Photos or Videos Yet",
                     style = MaterialTheme.typography.titleLarge,
                     color = TextPrimaryWhite
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Capture 4K photos or 1000 Mbps 4K videos in the viewfinder, or load a 4K Studio Sample Shot to test the 24 Film/Travel LUTs & 10 Cinema Log curves.",
+                    text = "Captured photos are saved unchanged to Pictures/Camera/ as Original JPEG, plus a separate _AI2x.jpg or _AI4x.jpg file when AI Upscale is enabled.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondaryZinc
                 )
@@ -215,7 +217,7 @@ fun GalleryScreen(
                         onClick = onImportSamplePhoto,
                         modifier = Modifier.testTag("empty_gallery_load_sample")
                     ) {
-                        Text("Load 4K Sample", color = GalaxyAmber)
+                        Text("Load Sample Shot", color = GalaxyAmber)
                     }
                 }
             }
@@ -260,17 +262,36 @@ fun GalleryScreen(
                     )
                 }
 
+                // File Info + ORIGINAL vs AI UPSCALE 2x / 4x Variant Badge
+                val isAiUpscaled = selected.variantBadge.startsWith("AI UPSCALE")
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(12.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(ObsidianGlass)
-                        .border(1.dp, DividerSubtle, RoundedCornerShape(14.dp))
+                        .border(
+                            width = 1.dp,
+                            color = if (isAiUpscaled) EmeraldOptimal else DividerSubtle,
+                            shape = RoundedCornerShape(14.dp)
+                        )
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isAiUpscaled) EmeraldOptimal else GalaxyAmber)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = selected.variantBadge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmoledBlack,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                     Column {
                         Text(
                             text = selected.displayName,
@@ -280,14 +301,15 @@ fun GalleryScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${if (selected.isVideo) "VIDEO MP4" else "PHOTO 4K JPEG"} • ${selected.formattedResolution} • ${selected.formattedSize}",
+                            text = "${selected.formattedResolution} • ${selected.formattedSize}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = GalaxyAmber
+                            color = if (isAiUpscaled) EmeraldOptimal else GalaxyAmber
                         )
                     }
                 }
             }
 
+            // Bottom Filmstrip showing both ORIGINAL and AI UPSCALE files with labels
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -296,13 +318,18 @@ fun GalleryScreen(
             ) {
                 items(state.mediaList, key = { "${it.isVideo}_${it.id}" }) { item ->
                     val isCurrent = item.id == selected.id && item.isVideo == selected.isVideo
+                    val isItemAi = item.variantBadge.startsWith("AI UPSCALE")
                     Box(
                         modifier = Modifier
-                            .size(68.dp)
+                            .size(72.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .border(
                                 width = if (isCurrent) 2.5.dp else 1.dp,
-                                color = if (isCurrent) GalaxyAmber else DividerSubtle,
+                                color = when {
+                                    isCurrent -> GalaxyAmber
+                                    isItemAi -> EmeraldOptimal.copy(alpha = 0.7f)
+                                    else -> DividerSubtle
+                                },
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .clickable { onSelectMedia(item) }
@@ -322,6 +349,24 @@ fun GalleryScreen(
                                 modifier = Modifier
                                     .align(Alignment.Center)
                                     .size(24.dp)
+                            )
+                        }
+                        // Label badge at bottom of each thumbnail ("ORIGINAL", "AI UPSCALE 2x", "AI UPSCALE 4x")
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .background(AmoledBlack.copy(alpha = 0.78f))
+                                .padding(vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = item.variantBadge,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isItemAi) EmeraldOptimal else TextPrimaryWhite,
+                                maxLines = 1
                             )
                         }
                     }
@@ -516,7 +561,7 @@ fun PhotoEditorScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save 4K", fontWeight = FontWeight.Bold)
+                    Text("Save Copy", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -659,28 +704,28 @@ fun PhotoEditorScreen(
                     ) {
                         CompactEditorSlider(
                             label = "BRIGHTNESS",
-                            valueText = String.format("%+.0f", editState.brightness),
+                            valueText = String.format(Locale.US, "%+.0f", editState.brightness),
                             value = editState.brightness,
                             range = -60f..60f,
                             onValueChange = viewModel::updateEditBrightness
                         )
                         CompactEditorSlider(
                             label = "CONTRAST",
-                            valueText = String.format("%.2fx", editState.contrast),
+                            valueText = String.format(Locale.US, "%.2fx", editState.contrast),
                             value = editState.contrast,
                             range = 0.6f..1.6f,
                             onValueChange = viewModel::updateEditContrast
                         )
                         CompactEditorSlider(
                             label = "SATURATION",
-                            valueText = String.format("%.2fx", editState.saturation),
+                            valueText = String.format(Locale.US, "%.2fx", editState.saturation),
                             value = editState.saturation,
                             range = 0.0f..2.0f,
                             onValueChange = viewModel::updateEditSaturation
                         )
                         CompactEditorSlider(
                             label = "WARMTH",
-                            valueText = String.format("%+.0f", editState.warmth),
+                            valueText = String.format(Locale.US, "%+.0f", editState.warmth),
                             value = editState.warmth,
                             range = -40f..40f,
                             onValueChange = viewModel::updateEditWarmth
@@ -748,12 +793,12 @@ fun PhotoEditorScreen(
                         ) {
                             Column {
                                 Text(
-                                    text = "Galaxy 4K EXIF Watermark",
+                                    text = "Timestamp Watermark",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = TextPrimaryWhite
                                 )
                                 Text(
-                                    text = "Render signature bottom metadata bar with LUT & Log",
+                                    text = "Add device model and date/time stamp to edited copy",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = TextSecondaryZinc
                                 )

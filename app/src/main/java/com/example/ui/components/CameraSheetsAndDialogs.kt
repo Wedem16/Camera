@@ -60,7 +60,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -84,6 +83,7 @@ import com.example.ui.theme.RecordCrimson
 import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
 import com.example.viewmodel.CameraUiState
+import java.util.Locale
 import kotlin.math.roundToInt
 
 private val BITRATE_PRESETS_MBPS = listOf(24, 50, 100, 200, 300, 400, 600, 800, 1000)
@@ -135,19 +135,19 @@ fun LutAndLogBottomSheet(
                     ) {
                         Icon(
                             imageVector = Icons.Default.ColorLens,
-                            contentDescription = "Film & Travel LUTs",
+                            contentDescription = "Creative LUTs",
                             tint = AmoledBlack
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "PRO CINEMA LOGS & CREATIVE LUTS",
+                            text = "OPTIONAL CREATIVE LUTS & LOGS",
                             style = MaterialTheme.typography.labelLarge,
                             color = GalaxyAmber
                         )
                         Text(
-                            text = "10 Cinema Log Profiles • 24 Film, Travel & Cinema 3D LUTs",
+                            text = "Default is Neutral (Off) • Opt-in Film & Travel Color Looks",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondaryZinc
                         )
@@ -164,14 +164,13 @@ fun LutAndLogBottomSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Section 1: 10 Cinema Log Color Profiles
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "CINEMA LOG GAMMA PROFILE (${state.activeLogProfile.shortCode})",
+                    text = "LOG GAMMA PROFILE (${state.activeLogProfile.shortCode})",
                     style = MaterialTheme.typography.labelSmall,
                     color = AiCyan
                 )
@@ -234,7 +233,6 @@ fun LutAndLogBottomSheet(
             HorizontalDivider(color = DividerSubtle)
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Section 2: LUT Intensity Slider + Reset
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -274,7 +272,7 @@ fun LutAndLogBottomSheet(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "RESET",
+                            text = "RESET NEUTRAL",
                             style = MaterialTheme.typography.labelSmall,
                             color = GalaxyAmber
                         )
@@ -296,7 +294,6 @@ fun LutAndLogBottomSheet(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // LUT Category Filter Pills (ALL, FILM STOCK, TRAVEL, CINEMA, B&W NOIR)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -326,7 +323,6 @@ fun LutAndLogBottomSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Grid of 24 Film, Travel, Cinema & B&W LUTs
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -422,19 +418,19 @@ fun BitrateSelectorBottomSheet(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Speed,
-                            contentDescription = "Pro Video Bitrate",
+                            contentDescription = "Video Bitrate",
                             tint = AmoledBlack
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "PRO 4K VIDEO ENCODER BITRATE",
+                            text = "VIDEO ENCODER BITRATE",
                             style = MaterialTheme.typography.labelLarge,
                             color = GalaxyAmber
                         )
                         Text(
-                            text = "$videoResolutionLabel @ $videoFpsLabel • Up to 1000 Mbps All-Intra Style",
+                            text = "$videoResolutionLabel @ $videoFpsLabel • 10 to 1000 Mbps",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondaryZinc
                         )
@@ -451,7 +447,6 @@ fun BitrateSelectorBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Live Bitrate Telemetry Readout Card
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -477,12 +472,12 @@ fun BitrateSelectorBottomSheet(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = String.format("~%.1f MB/sec", mbPerSecond),
+                        text = String.format(Locale.US, "~%.1f MB/sec", mbPerSecond),
                         style = MaterialTheme.typography.labelMedium,
                         color = EmeraldOptimal
                     )
                     Text(
-                        text = String.format("~%.2f GB/min", gbPerMinute),
+                        text = String.format(Locale.US, "~%.2f GB/min", gbPerMinute),
                         style = MaterialTheme.typography.labelSmall,
                         color = AiCyan
                     )
@@ -491,7 +486,6 @@ fun BitrateSelectorBottomSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Continuous Slider 10 Mbps .. 1000 Mbps
             Slider(
                 value = currentBitrateMbps.toFloat(),
                 onValueChange = { onSelectBitrateMbps(it.roundToInt().coerceIn(10, 1000)) },
@@ -506,7 +500,7 @@ fun BitrateSelectorBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "QUICK CINEMA BITRATE PRESETS (MBPS)",
+                text = "QUICK BITRATE PRESETS (MBPS)",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondaryZinc
             )
@@ -580,7 +574,7 @@ fun MoreModesBottomSheet(
             ) {
                 Column {
                     Text(
-                        text = "GALAXY 4K SHOOTING MODES",
+                        text = "CAMERA SHOOTING MODES",
                         style = MaterialTheme.typography.labelLarge,
                         color = GalaxyAmber
                     )
@@ -724,12 +718,12 @@ fun AiSceneCoachBottomSheet(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "HYBRID AI SCENE OPTIMIZER",
+                            text = "HYBRID AI SCENE COACH",
                             style = MaterialTheme.typography.labelLarge,
                             color = AiCyan
                         )
                         Text(
-                            text = "On-Device Sensor + Gemini 3.8 Flash Vision Coach",
+                            text = "On-Device Telemetry + Gemini Vision Critique",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondaryZinc
                         )
@@ -901,7 +895,7 @@ fun AiSceneCoachBottomSheet(
                             RecommendedPill("ISO", "${critique.recommendedIso}")
                             RecommendedPill("SHUTTER", critique.recommendedShutterLabel)
                             RecommendedPill("WB", "${critique.recommendedKelvin}K")
-                            RecommendedPill("EV", String.format("%+.1f", critique.recommendedEvShift))
+                            RecommendedPill("EV", String.format(Locale.US, "%+.1f", critique.recommendedEvShift))
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
@@ -960,6 +954,8 @@ private fun RecommendedPill(label: String, value: String) {
 @Composable
 fun CameraSettingsDialog(
     state: CameraUiState,
+    onCycleAiUpscaleMode: () -> Unit,
+    onToggleCreativeFilters: () -> Unit,
     onTogglePhotoResolution: () -> Unit,
     onCyclePhotoFormat: () -> Unit,
     onToggleVideoResolution: () -> Unit,
@@ -970,7 +966,6 @@ fun CameraSettingsDialog(
     onToggleDiagnosticLogs: () -> Unit,
     onToggleVideoStabilization: () -> Unit,
     onToggleAiOptimizer: () -> Unit,
-    onToggleAiZoomAutoEnhance: () -> Unit,
     onToggleGridLines: () -> Unit,
     onToggleWatermark: () -> Unit,
     onToggleVolumeShutter: () -> Unit,
@@ -993,12 +988,12 @@ fun CameraSettingsDialog(
             ) {
                 Column {
                     Text(
-                        text = "GALAXY 200MP & 4K CAMERA SETTINGS",
+                        text = "CAMERA & HARDWARE SETTINGS",
                         style = MaterialTheme.typography.labelLarge,
                         color = GalaxyAmber
                     )
                     Text(
-                        text = "200MP 1/1.4\" OIS • 12MP UW • Snapdragon 7 Gen 4 • MagicOS 10",
+                        text = "Native Capture Pipeline • NR=FAST • EDGE=FAST",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondaryZinc
                     )
@@ -1023,7 +1018,7 @@ fun CameraSettingsDialog(
                     .padding(12.dp)
             ) {
                 Text(
-                    text = "${caps.mainSensorSpec} + ${caps.ultraWideSensorSpec}",
+                    text = "${caps.mainSensorSpec} • ${caps.ultraWideSensorSpec}",
                     style = MaterialTheme.typography.labelSmall,
                     color = AiCyan
                 )
@@ -1034,7 +1029,7 @@ fun CameraSettingsDialog(
                     color = EmeraldOptimal
                 )
                 Text(
-                    text = "Zoom ISP: ${state.activeZoomProfile.badgeLabel}",
+                    text = "Physical IDs: ${if (caps.physicalCameraIds.isEmpty()) "Logical Default" else caps.physicalCameraIds.joinToString()} • RAW: ${if (caps.supportsRawCapability) "Yes" else "Fallback"}",
                     style = MaterialTheme.typography.labelSmall,
                     color = GalaxyAmber
                 )
@@ -1048,7 +1043,15 @@ fun CameraSettingsDialog(
             Spacer(modifier = Modifier.height(14.dp))
 
             SettingActionRow(
-                title = "Photo Capture Format (RAW / JPG / PNG)",
+                title = "On-Device AI Upscale Mode",
+                subtitle = "Original (default) or separate _AI2x / _AI4x file",
+                badge = state.aiUpscaleMode.uiLabel,
+                onClick = onCycleAiUpscaleMode,
+                testTag = "setting_ai_upscale_mode"
+            )
+
+            SettingActionRow(
+                title = "Photo Capture Format (JPG / RAW+JPG / PNG)",
                 subtitle = state.photoFormat.fullTitle,
                 badge = state.photoFormat.badgeLabel,
                 onClick = onCyclePhotoFormat,
@@ -1056,7 +1059,7 @@ fun CameraSettingsDialog(
             )
 
             SettingActionRow(
-                title = "Photo Resolution (200MP / 50MP / 4K / 12MP)",
+                title = "Photo Target Resolution",
                 subtitle = state.photoResolution.fullTitle,
                 badge = state.photoResolution.shortLabel,
                 onClick = onTogglePhotoResolution,
@@ -1072,7 +1075,7 @@ fun CameraSettingsDialog(
             )
 
             SettingActionRow(
-                title = "Video Resolution (4K UHD)",
+                title = "Video Resolution (4K UHD / 1080p)",
                 subtitle = state.videoResolution.fullTitle,
                 badge = state.videoResolution.shortLabel,
                 onClick = onToggleVideoResolution,
@@ -1080,7 +1083,7 @@ fun CameraSettingsDialog(
             )
 
             SettingActionRow(
-                title = "Video Encoder Bitrate (Up to 1000)",
+                title = "Video Encoder Bitrate (10–1000 Mbps)",
                 subtitle = "Configure target bitrate from 10 to 1000 Mbps",
                 badge = "${state.videoBitrateMbps} Mbps",
                 onClick = {
@@ -1088,17 +1091,6 @@ fun CameraSettingsDialog(
                     onOpenBitrateSheet()
                 },
                 testTag = "setting_video_bitrate"
-            )
-
-            SettingActionRow(
-                title = "Film & Travel LUTs + Cinema Log",
-                subtitle = "${state.activeLut.label} • ${state.activeLogProfile.fullTitle}",
-                badge = state.activeLogProfile.shortCode,
-                onClick = {
-                    onDismiss()
-                    onOpenLutLogSheet()
-                },
-                testTag = "setting_lut_log"
             )
 
             SettingActionRow(
@@ -1115,32 +1107,45 @@ fun CameraSettingsDialog(
             )
 
             SettingToggleRow(
-                title = "AI Zoom & Auto Picture Quality",
-                subtitle = "Automatically sharpen & upscale 1x–10x zoomed captures",
-                checked = state.aiZoomAutoEnhanceEnabled,
-                onCheckedChange = { onToggleAiZoomAutoEnhance() },
-                testTag = "setting_ai_zoom_enhance"
+                title = "Enable Creative Filters & LUTs",
+                subtitle = "Default is OFF (Neutral color). Turn ON to use LUTs/Logs",
+                checked = state.creativeFiltersEnabled,
+                onCheckedChange = { onToggleCreativeFilters() },
+                testTag = "setting_creative_filters"
             )
+
+            if (state.creativeFiltersEnabled) {
+                SettingActionRow(
+                    title = "Select Creative LUT & Log Curve",
+                    subtitle = "${state.activeLut.label} • ${state.activeLogProfile.fullTitle}",
+                    badge = state.activeLogProfile.shortCode,
+                    onClick = {
+                        onDismiss()
+                        onOpenLutLogSheet()
+                    },
+                    testTag = "setting_lut_log"
+                )
+            }
 
             SettingToggleRow(
                 title = "AI Scene Optimizer",
-                subtitle = "Real-time luminance & color scene tuning",
+                subtitle = "Optional scene color adjustment (Default OFF)",
                 checked = state.aiSceneOptimizerEnabled,
                 onCheckedChange = { onToggleAiOptimizer() },
                 testTag = "setting_ai_optimizer"
             )
 
             SettingToggleRow(
-                title = "Live Pro Telemetry & Logs HUD",
-                subtitle = "Show real-time hardware, bitrate & LUT logs on screen",
+                title = "Live Telemetry & Logs HUD",
+                subtitle = "Show real-time hardware, NR/EDGE & zoom logs on screen",
                 checked = state.showDiagnosticLogsOverlay,
                 onCheckedChange = { onToggleDiagnosticLogs() },
                 testTag = "setting_diagnostic_logs"
             )
 
             SettingToggleRow(
-                title = "Super Steady Stabilization",
-                subtitle = "Hardware Camera2 video stabilization",
+                title = "Optical / Video Stabilization (OIS+EIS)",
+                subtitle = "Hardware Camera2 stabilization",
                 checked = state.videoStabilizationEnabled,
                 onCheckedChange = { onToggleVideoStabilization() },
                 testTag = "setting_video_stabilization"
@@ -1155,8 +1160,8 @@ fun CameraSettingsDialog(
             )
 
             SettingToggleRow(
-                title = "Galaxy 4K Shot Watermark",
-                subtitle = "Stamp 4K resolution, LUT & Log telemetry on photos",
+                title = "Timestamp Watermark",
+                subtitle = "Default OFF (Unchanged clean photo)",
                 checked = state.watermarkEnabled,
                 onCheckedChange = { onToggleWatermark() },
                 testTag = "setting_watermark"

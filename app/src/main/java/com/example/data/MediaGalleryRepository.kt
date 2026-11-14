@@ -13,18 +13,18 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import com.example.R
+import com.example.model.AiUpscaleMode
 import com.example.model.AspectRatioSetting
 import com.example.model.CameraMode
 import com.example.model.CropAspectPreset
@@ -36,7 +36,6 @@ import com.example.model.PhotoFormatSetting
 import com.example.model.PhotoResolutionSetting
 import com.example.model.ProCameraSettings
 import com.example.model.SceneCategory
-import com.example.model.ZoomOptimizationProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.OutputStream
@@ -47,6 +46,12 @@ import kotlin.math.max
 import kotlin.math.min
 
 private const val TAG = "MediaGalleryRepo"
+
+data class SavedCaptureResult(
+    val originalUri: Uri,
+    val baseTimestamp: String,
+    val originalBitmap: Bitmap
+)
 
 class MediaGalleryRepository(private val context: Context) {
 
@@ -163,10 +168,12 @@ class MediaGalleryRepository(private val context: Context) {
     }
 
     /**
-     * Processes a captured camera Bitmap according to the active CameraMode, 4K/50MP Resolution,
-     * PhotoFormatSetting (JPG, RAW+JPG .dng, PNG Lossless, HEIF/WEBP), hybrid 10x zoom crop,
-     * AI Super-Resolution Zoom & Auto Quality Enhancer, Film/Travel LUT, Cinema Log Profile,
-     * ProCameraSettings, and AI Scene Optimizer.
+     * Saves the captured photo to `Pictures/Camera/` via MediaStore.
+     * - By default (`creativeFiltersEnabled == false`, `addWatermark == false`), the original photo
+     *   is saved unchanged at its native sensor resolution without any center-crop upscaling,
+     *   painterly sharpening overlay, or LUT tinting.
+     * - Never overwrites an existing file.
+     * - Writes EXIF metadata (DateTime, Make, Model, Dimensions, Orientation).
      */
     suspend fun processAndSaveCapturedPhoto(
         rawBitmap: Bitmap,
@@ -178,93 +185,136 @@ class MediaGalleryRepository(private val context: Context) {
         activeLut: PhotoFilterPreset,
         lutIntensity: Float,
         activeLogProfile: LogProfile,
-        aiSceneOptimizerEnabled: Boolean,
-        aiZoomAutoEnhanceEnabled: Boolean = true,
+        creativeFiltersEnabled: Boolean = false,
+        aiSceneOptimizerEnabled: Boolean = false,
         currentZoomRatio: Float = 1.0f,
         extraHybridZoomFactor: Float = 1.0f,
-        detectedScene: SceneCategory,
-        portraitBlurStrength: Float,
-        beautySmoothness: Float,
-        addWatermark: Boolean
-    ): Uri? = withContext(Dispatchers.IO) {
+        detectedScene: SceneCategory = SceneCategory.AUTO,
+        portraitBlurStrength: Float = 0f,
+        beautySmoothness: Float = 0f,
+        addWatermark: Boolean = false
+    ): SavedCaptureResult? = withContext(Dispatchers.IO) {
         try {
-            // 1. Apply hybrid zoom center-crop if the user zoomed beyond sensor's hardware max (e.g. 10x)
-            val zoomCropped = if (extraHybridZoomFactor > 1.02f) {
-                cropCenterByZoomFactor(rawBitmap, extraHybridZoomFactor.coerceIn(1.0f, 10.0f))
+            val baseTimestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+
+            // Only apply last-resort center-crop if extraHybridZoomFactor > 1.02f was explicitly requested
+            val zoomSource = if (extraHybridZoomFactor > 1.02f) {
+                lastResortCenterCropFallback(rawBitmap, extraHybridZoomFactor.coerceIn(1.0f, 10.0f))
             } else {
                 rawBitmap
             }
 
-            // 2. Crop to selected aspect ratio (or 2.35:1 panoramic strip in PANORAMA mode)
+            // Crop only if user selected a non-native aspect ratio or Panorama strip
             val targetRatio = if (mode == CameraMode.PANORAMA) {
                 2.35f
             } else {
                 aspectRatio.ratioValue
             }
-            val cropped = cropBitmapToRatio(zoomCropped, targetRatio, isPanorama = mode == CameraMode.PANORAMA)
-
-            // 3. Guarantee True 4K UHD (3840×2160) or 50MP Master resolution
-            val targetLong = resolution.targetLongEdgePx
-            val currentLong = max(cropped.width, cropped.height).coerceAtLeast(1)
-            val scaled = if (currentLong < targetLong) {
-                val scaleFactor = targetLong.toFloat() / currentLong.toFloat()
-                val newW = (cropped.width * scaleFactor).toInt().coerceAtLeast(1)
-                val newH = (cropped.height * scaleFactor).toInt().coerceAtLeast(1)
-                Bitmap.createScaledBitmap(cropped, newW, newH, true)
+            val framedBitmap = if (targetRatio != null) {
+                cropBitmapToRatio(zoomSource, targetRatio, isPanorama = mode == CameraMode.PANORAMA)
             } else {
-                cropped
+                zoomSource
             }
 
-            // 4. Apply computational mode, AI Super-Resolution Zoom Quality Enhancer, LUT, and Cinema Log
-            val processed = applyComputationalModeEffects(
-                source = scaled,
-                mode = mode,
-                proSettings = proSettings,
-                activeLut = activeLut,
-                lutIntensity = lutIntensity,
-                activeLogProfile = activeLogProfile,
-                aiSceneOptimizerEnabled = aiSceneOptimizerEnabled,
-                aiZoomAutoEnhanceEnabled = aiZoomAutoEnhanceEnabled,
-                currentZoomRatio = currentZoomRatio,
-                detectedScene = detectedScene,
-                portraitBlurStrength = portraitBlurStrength,
-                beautySmoothness = beautySmoothness,
-                addWatermark = addWatermark,
-                resolutionLabel = "${scaled.width}×${scaled.height} (${resolution.shortLabel} • ${photoFormat.badgeLabel})"
-            )
+            // Determine whether any optional creative filter, computational mode, or watermark is active.
+            // When shooting standard PHOTO/PRO with creativeFiltersEnabled=false and addWatermark=false,
+            // keep the unchanged original capture bitmap directly so zero painterly artifacts are introduced.
+            val hasCreativeLut = creativeFiltersEnabled &&
+                (activeLut != PhotoFilterPreset.ORIGINAL || activeLogProfile != LogProfile.STANDARD_REC709)
+            val needsComputationalPass = hasCreativeLut ||
+                aiSceneOptimizerEnabled ||
+                addWatermark ||
+                mode in listOf(CameraMode.NIGHT, CameraMode.HDR, CameraMode.PORTRAIT, CameraMode.BEAUTY)
 
-            // 5. Write to MediaStore in the requested format (JPG, RAW+JPG .dng, PNG, or WEBP)
+            val finalOriginalBitmap = if (needsComputationalPass) {
+                applyOptionalCreativeEffects(
+                    source = framedBitmap,
+                    mode = mode,
+                    proSettings = proSettings,
+                    activeLut = if (creativeFiltersEnabled) activeLut else PhotoFilterPreset.ORIGINAL,
+                    lutIntensity = lutIntensity,
+                    activeLogProfile = if (creativeFiltersEnabled) activeLogProfile else LogProfile.STANDARD_REC709,
+                    aiSceneOptimizerEnabled = aiSceneOptimizerEnabled,
+                    detectedScene = detectedScene,
+                    portraitBlurStrength = portraitBlurStrength,
+                    beautySmoothness = beautySmoothness,
+                    addWatermark = addWatermark,
+                    resolutionLabel = "${framedBitmap.width}×${framedBitmap.height}"
+                )
+            } else {
+                framedBitmap
+            }
+
+            // Always save the original capture as JPEG (and DNG container if RAW_DNG is selected) to Pictures/Camera/
+            val savedOriginalUri = saveBitmapToMediaStore(
+                bitmap = finalOriginalBitmap,
+                exactFileName = "IMG_$baseTimestamp.${if (photoFormat == PhotoFormatSetting.RAW_DNG) "jpg" else photoFormat.extension}",
+                jpegQuality = 100,
+                photoFormat = if (photoFormat == PhotoFormatSetting.RAW_DNG) PhotoFormatSetting.JPEG else photoFormat,
+                zoomRatio = currentZoomRatio
+            ) ?: return@withContext null
+
             if (photoFormat == PhotoFormatSetting.RAW_DNG) {
-                // Save accompanying DNG RAW master file + 4K Developed JPG master
                 saveBitmapToMediaStore(
-                    bitmap = processed,
-                    prefix = "GALAXY_4K_RAW_${mode.name}",
+                    bitmap = finalOriginalBitmap,
+                    exactFileName = "IMG_${baseTimestamp}_RAW.dng",
                     jpegQuality = 100,
-                    photoFormat = PhotoFormatSetting.RAW_DNG
-                )
-                saveBitmapToMediaStore(
-                    bitmap = processed,
-                    prefix = "GALAXY_4K_RAW_DEV_${mode.name}",
-                    jpegQuality = 100,
-                    photoFormat = PhotoFormatSetting.JPEG
-                )
-            } else {
-                saveBitmapToMediaStore(
-                    bitmap = processed,
-                    prefix = "GALAXY_4K_${mode.name}",
-                    jpegQuality = resolution.jpegQuality,
-                    photoFormat = photoFormat
+                    photoFormat = PhotoFormatSetting.RAW_DNG,
+                    zoomRatio = currentZoomRatio
                 )
             }
+
+            SavedCaptureResult(
+                originalUri = savedOriginalUri,
+                baseTimestamp = baseTimestamp,
+                originalBitmap = finalOriginalBitmap
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to process and save 4K photo", e)
+            Log.e(TAG, "Failed to save original photo", e)
             null
         }
     }
 
     /**
-     * Imports a 4K studio sample photo from our bundled flagship camera drawable so users can test
-     * the Photo Editor, Film/Travel LUTs, and Log profiles immediately.
+     * Runs the optional On-Device AI Super-Resolution (2x or 4x) on `Dispatchers.Default` with tiling
+     * and saves the upscaled image as a SEPARATE file (`IMG_xxx_AI2x.jpg` or `IMG_xxx_AI4x.jpg`)
+     * in `Pictures/Camera/`, never overwriting the original capture.
+     */
+    suspend fun saveAiUpscaledSeparatePhoto(
+        originalBitmap: Bitmap,
+        baseTimestamp: String,
+        upscaleMode: AiUpscaleMode,
+        zoomRatio: Float,
+        srEngine: OnDeviceSuperResolutionEngine,
+        onProgress: (Int) -> Unit
+    ): Pair<Uri?, OnDeviceSuperResolutionEngine.UpscaleResult?> = withContext(Dispatchers.Default) {
+        if (upscaleMode == AiUpscaleMode.ORIGINAL) return@withContext (null to null)
+        try {
+            val srResult = srEngine.upscaleBitmapTiled(
+                source = originalBitmap,
+                mode = upscaleMode,
+                onProgress = onProgress
+            )
+            val separateFileName = "IMG_${baseTimestamp}${upscaleMode.fileSuffix}.jpg"
+            val savedUri = withContext(Dispatchers.IO) {
+                saveBitmapToMediaStore(
+                    bitmap = srResult.bitmap,
+                    exactFileName = separateFileName,
+                    jpegQuality = 98,
+                    photoFormat = PhotoFormatSetting.JPEG,
+                    zoomRatio = zoomRatio
+                )
+            }
+            savedUri to srResult
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to generate or save AI upscaled photo", e)
+            null to null
+        }
+    }
+
+    /**
+     * Imports a sample photo from our bundled drawable into `Pictures/Camera/` so users can test
+     * the Photo Editor, optional LUTs, and AI Upscale comparison.
      */
     suspend fun createStudioSamplePhoto(): Uri? = withContext(Dispatchers.IO) {
         try {
@@ -272,34 +322,34 @@ class MediaGalleryRepository(private val context: Context) {
                 context.resources,
                 R.drawable.img_camera_hero_lens_1794590959493
             ) ?: return@withContext null
-            val sample4K = Bitmap.createScaledBitmap(rawSample, 3840, 2160, true)
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             saveBitmapToMediaStore(
-                bitmap = sample4K,
-                prefix = "GALAXY_4K_STUDIO_SAMPLE",
+                bitmap = rawSample,
+                exactFileName = "IMG_${timestamp}_SAMPLE.jpg",
                 jpegQuality = 100,
                 photoFormat = PhotoFormatSetting.JPEG
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create studio sample photo", e)
+            Log.e(TAG, "Failed to create sample photo", e)
             null
         }
     }
 
     /**
-     * Renders non-destructive photo edits (Film/Travel LUT, Cinema Log Profile, Brightness,
-     * Contrast, Saturation, Warmth, Vignette, Rotation, Aspect Crop, and Galaxy EXIF Watermark)
-     * and saves a new 4K copy in MediaStore.
+     * Renders non-destructive photo edits in the Gallery Editor and saves a new copy (`IMG_xxx_EDIT.jpg`)
+     * in `Pictures/Camera/`, never overwriting the original.
      */
     suspend fun saveEditedPhoto(
         sourceUri: Uri,
         editState: PhotoEditState
     ): Uri? = withContext(Dispatchers.IO) {
         try {
-            val originalBitmap = decodeBitmapFromUri(sourceUri, maxDimension = 3840) ?: return@withContext null
+            val originalBitmap = decodeBitmapFromUri(sourceUri, maxDimension = 4096) ?: return@withContext null
             val rendered = renderPhotoEdits(originalBitmap, editState)
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             saveBitmapToMediaStore(
                 bitmap = rendered,
-                prefix = "GALAXY_4K_LUT_${editState.filter.name}",
+                exactFileName = "IMG_${timestamp}_EDIT_${editState.filter.name}.jpg",
                 jpegQuality = 100,
                 photoFormat = PhotoFormatSetting.JPEG
             )
@@ -309,7 +359,7 @@ class MediaGalleryRepository(private val context: Context) {
         }
     }
 
-    fun decodeBitmapFromUri(uri: Uri, maxDimension: Int = 3840): Bitmap? {
+    fun decodeBitmapFromUri(uri: Uri, maxDimension: Int = 4096): Bitmap? {
         return try {
             val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             contentResolver.openInputStream(uri)?.use {
@@ -381,13 +431,13 @@ class MediaGalleryRepository(private val context: Context) {
             drawVignetteOverlay(canvas, outBitmap.width.toFloat(), outBitmap.height.toFloat(), editState.vignette)
         }
 
-        // 5. Optional Galaxy Flagship Watermark
+        // 5. Optional Timestamp Watermark (opt-in only)
         if (editState.showGalaxyWatermark) {
-            drawGalaxyWatermark(
+            drawMinimalTimestampWatermark(
                 canvas = canvas,
                 width = outBitmap.width.toFloat(),
                 height = outBitmap.height.toFloat(),
-                subtitle = "Galaxy 4K Studio • LUT: ${editState.filter.label} • ${editState.logProfile.shortCode}"
+                subtitle = "${Build.MODEL} • ${outBitmap.width}×${outBitmap.height}"
             )
         }
 
@@ -420,7 +470,12 @@ class MediaGalleryRepository(private val context: Context) {
         }
     }
 
-    private fun cropCenterByZoomFactor(source: Bitmap, factor: Float): Bitmap {
+    /**
+     * LAST-RESORT FALLBACK ONLY:
+     * Center-crops the image only when hardware/optical zoom (`CameraControl.setZoomRatio`) is
+     * completely unavailable on a legacy device. Disabled by default (`extraHybridZoomFactor == 1.0f`).
+     */
+    private fun lastResortCenterCropFallback(source: Bitmap, factor: Float): Bitmap {
         val w = source.width
         val h = source.height
         if (w <= 4 || h <= 4 || factor <= 1.01f) return source
@@ -431,7 +486,7 @@ class MediaGalleryRepository(private val context: Context) {
         return Bitmap.createBitmap(source, offsetX, offsetY, newW, newH)
     }
 
-    private fun applyComputationalModeEffects(
+    private fun applyOptionalCreativeEffects(
         source: Bitmap,
         mode: CameraMode,
         proSettings: ProCameraSettings,
@@ -439,8 +494,6 @@ class MediaGalleryRepository(private val context: Context) {
         lutIntensity: Float,
         activeLogProfile: LogProfile,
         aiSceneOptimizerEnabled: Boolean,
-        aiZoomAutoEnhanceEnabled: Boolean,
-        currentZoomRatio: Float,
         detectedScene: SceneCategory,
         portraitBlurStrength: Float,
         beautySmoothness: Float,
@@ -457,56 +510,35 @@ class MediaGalleryRepository(private val context: Context) {
         var brightness = 0f
         var warmth = 0f
 
-        val zoomProfile = ZoomOptimizationProfile.fromZoomRatio(currentZoomRatio)
-
         if (aiSceneOptimizerEnabled) {
             saturation *= detectedScene.saturationBoost
             contrast *= detectedScene.contrastBoost
             warmth += detectedScene.warmthShift
-            // Improved Night & Low-Light Photography: natural shadow lift without washing out blacks
             if (detectedScene == SceneCategory.NIGHT_LOW_LIGHT) {
-                brightness += 8f
+                brightness += 6f
             }
-        }
-
-        // Apply Dedicated Per-Zoom ISP Processing Profile (0.6x, 1x 200MP, 2x Crop, 3x Super-Res, 4x-5x, 10x Natural)
-        if (aiZoomAutoEnhanceEnabled) {
-            contrast *= zoomProfile.contrastMultiplier
-            saturation *= zoomProfile.saturationMultiplier
-            brightness += zoomProfile.shadowLiftOffset
         }
 
         when (mode) {
             CameraMode.NIGHT -> {
-                // Improved Night Photography: deep shadow recovery, clean low-noise blacks, natural saturation
-                contrast *= 1.11f
-                saturation *= 1.09f
-                brightness += 16f
-                warmth += 3f
+                contrast *= 1.06f
+                saturation *= 1.04f
+                brightness += 10f
             }
             CameraMode.HDR -> {
-                // Premium HDR with excellent dynamic range & highlight protection
-                contrast *= 1.13f
-                saturation *= 1.12f
-                brightness += 6f
+                contrast *= 1.06f
+                saturation *= 1.05f
+                brightness += 4f
             }
             CameraMode.BEAUTY -> {
-                // Natural skin tones without plastic/excessive AI smoothing
-                contrast *= (1.0f - beautySmoothness * 0.06f)
-                saturation *= 1.03f
-                brightness += beautySmoothness * 9f
-                warmth += beautySmoothness * 6f
+                contrast *= (1.0f - beautySmoothness * 0.04f)
+                saturation *= 1.02f
+                brightness += beautySmoothness * 6f
+                warmth += beautySmoothness * 4f
             }
             CameraMode.PORTRAIT -> {
-                // Natural skin tones & realistic facial textures
-                contrast *= 1.04f
-                saturation *= 1.04f
-                warmth += 3f
-            }
-            CameraMode.PRO -> {
-                val kelvinDiff = (proSettings.customKelvin - 5500) / 120f
-                warmth += kelvinDiff.coerceIn(-35f, 35f)
-                brightness += proSettings.exposureCompensationIndex * 4f
+                contrast *= 1.02f
+                saturation *= 1.02f
             }
             else -> Unit
         }
@@ -525,12 +557,9 @@ class MediaGalleryRepository(private val context: Context) {
         }
         canvas.drawBitmap(source, 0f, 0f, paint)
 
-        // Natural Texture & Adaptive Edge Clarity Pass (No watercolor effect, no oversharpening)
-        if (aiZoomAutoEnhanceEnabled && mode != CameraMode.BEAUTY) {
-            applyAiSuperResolutionDetailPass(canvas, result, zoomProfile)
-        }
+        // Note: No PorterDuff.Mode.OVERLAY sharpening pass is applied here so foliage and fine
+        // textures remain natural and free of painterly/oil-painting artifacts.
 
-        // Mode-specific optical effects
         if (mode == CameraMode.PORTRAIT && portraitBlurStrength > 0.05f) {
             val downW = (width / 12).coerceAtLeast(16)
             val downH = (height / 12).coerceAtLeast(16)
@@ -556,63 +585,19 @@ class MediaGalleryRepository(private val context: Context) {
                 height * 0.90f
             )
             centerCanvas.drawOval(ovalRect, maskPaint)
-            drawVignetteOverlay(centerCanvas, width.toFloat(), height.toFloat(), portraitBlurStrength * 0.35f)
-
             canvas.drawBitmap(center, 0f, 0f, null)
-        } else if (mode == CameraMode.NIGHT || mode == CameraMode.HDR) {
-            drawVignetteOverlay(canvas, width.toFloat(), height.toFloat(), 0.16f)
         }
 
         if (addWatermark) {
-            val lutPart = if (activeLut != PhotoFilterPreset.ORIGINAL) " • LUT: ${activeLut.label}" else ""
-            val logPart = if (activeLogProfile != LogProfile.STANDARD_REC709) " • ${activeLogProfile.shortCode}" else ""
-            val zoomPart = " • ${zoomProfile.badgeLabel}"
             val telemetry = if (mode == CameraMode.PRO) {
-                "$resolutionLabel$zoomPart • ISO ${proSettings.formattedIso} • ${proSettings.formattedShutter} • ${proSettings.formattedWb}$lutPart$logPart"
+                "${Build.MODEL} • $resolutionLabel • ISO ${proSettings.formattedIso} • ${proSettings.formattedShutter}"
             } else {
-                "${mode.badgeTitle} • $resolutionLabel$zoomPart$lutPart$logPart"
+                "${Build.MODEL} • $resolutionLabel"
             }
-            drawGalaxyWatermark(canvas, width.toFloat(), height.toFloat(), telemetry)
+            drawMinimalTimestampWatermark(canvas, width.toFloat(), height.toFloat(), telemetry)
         }
 
         return result
-    }
-
-    /**
-     * Performs a profile-tuned natural texture & micro-contrast pass tailored to each zoom range
-     * (1x 200MP natural, 2x sensor crop, 3x multi-frame super-res, 4x-5x reconstruction, 10x anti-oversharpen).
-     */
-    private fun applyAiSuperResolutionDetailPass(
-        canvas: Canvas,
-        currentBitmap: Bitmap,
-        zoomProfile: ZoomOptimizationProfile
-    ) {
-        try {
-            val w = currentBitmap.width
-            val h = currentBitmap.height
-            if (w < 64 || h < 64) return
-
-            val detailAlpha = zoomProfile.microDetailOverlayAlpha.coerceIn(12, 36)
-            val c = zoomProfile.microDetailContrast.coerceIn(1.10f, 1.32f)
-            val t = 0.5f * (1f - c) * 255f
-
-            val naturalTextureMatrix = ColorMatrix(
-                floatArrayOf(
-                    c, 0f, 0f, 0f, t,
-                    0f, c, 0f, 0f, t,
-                    0f, 0f, c, 0f, t,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-            val detailPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-                alpha = detailAlpha
-                colorFilter = ColorMatrixColorFilter(naturalTextureMatrix)
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.OVERLAY)
-            }
-            canvas.drawBitmap(currentBitmap, 0f, 0f, detailPaint)
-        } catch (e: Exception) {
-            Log.w(TAG, "AI Super-Resolution pass skipped: ${e.message}")
-        }
     }
 
     private fun drawVignetteOverlay(
@@ -641,39 +626,21 @@ class MediaGalleryRepository(private val context: Context) {
         canvas.drawRect(0f, 0f, width, height, paint)
     }
 
-    private fun drawGalaxyWatermark(
+    private fun drawMinimalTimestampWatermark(
         canvas: Canvas,
         width: Float,
         height: Float,
         subtitle: String
     ) {
-        val barHeight = (min(width, height) * 0.075f).coerceAtLeast(48f)
-        val barTop = height - barHeight
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(190, 10, 12, 16)
-        }
-        canvas.drawRect(0f, barTop, width, height, bgPaint)
-
-        val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(255, 214, 10)
-        }
-        val padding = barHeight * 0.25f
-        canvas.drawRect(padding, barTop + padding, padding + 6f, height - padding, accentPaint)
-
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = barHeight * 0.34f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-        }
-        val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(185, 188, 198)
-            textSize = barHeight * 0.24f
+        val padding = (min(width, height) * 0.03f).coerceAtLeast(20f)
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(210, 255, 255, 255)
+            textSize = (min(width, height) * 0.024f).coerceAtLeast(22f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+            setShadowLayer(4f, 1f, 1f, Color.BLACK)
         }
-
-        val textX = padding + 20f
-        canvas.drawText("GALAXY HD • 200MP 1/1.4\" OIS • SD 7 GEN 4", textX, barTop + barHeight * 0.46f, titlePaint)
-        canvas.drawText(subtitle, textX, barTop + barHeight * 0.80f, subPaint)
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        canvas.drawText("$subtitle • $dateStr", padding, height - padding, textPaint)
     }
 
     private fun cropBitmapToRatio(
@@ -706,25 +673,30 @@ class MediaGalleryRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Saves a Bitmap to `Pictures/Camera` using MediaStore and writes standard EXIF metadata
+     * (DateTime, Orientation, Make, Model, Dimensions, Zoom ratio). Never overwrites existing files.
+     */
     @Suppress("DEPRECATION")
     private fun saveBitmapToMediaStore(
         bitmap: Bitmap,
-        prefix: String,
+        exactFileName: String,
         jpegQuality: Int,
-        photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG
+        photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG,
+        zoomRatio: Float = 1.0f
     ): Uri? {
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        val displayName = "${prefix}_$timestamp.${photoFormat.extension}"
-
+        val nowMs = System.currentTimeMillis()
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.DISPLAY_NAME, exactFileName)
             put(MediaStore.Images.Media.MIME_TYPE, photoFormat.mimeType)
             put(MediaStore.Images.Media.WIDTH, bitmap.width)
             put(MediaStore.Images.Media.HEIGHT, bitmap.height)
+            put(MediaStore.Images.Media.DATE_TAKEN, nowMs)
+            put(MediaStore.Images.Media.DATE_ADDED, nowMs / 1000L)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.Images.Media.RELATIVE_PATH,
-                    "${Environment.DIRECTORY_PICTURES}/GalaxyHDCamera"
+                    "${Environment.DIRECTORY_PICTURES}/Camera"
                 )
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
@@ -751,7 +723,16 @@ class MediaGalleryRepository(private val context: Context) {
                     PhotoFormatSetting.RAW_DNG, PhotoFormatSetting.JPEG -> Bitmap.CompressFormat.JPEG
                 }
                 bitmap.compress(compressFormat, jpegQuality.coerceIn(70, 100), outputStream)
+                outputStream.flush()
             }
+            outputStream?.close()
+            outputStream = null
+
+            // Write EXIF metadata (orientation, date/time, device make/model, dimensions, zoom)
+            if (photoFormat == PhotoFormatSetting.JPEG || photoFormat == PhotoFormatSetting.RAW_DNG) {
+                writeExifMetadata(uri, bitmap.width, bitmap.height, nowMs, zoomRatio)
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val completeValues = ContentValues().apply {
                     put(MediaStore.Images.Media.IS_PENDING, 0)
@@ -768,9 +749,40 @@ class MediaGalleryRepository(private val context: Context) {
         }
     }
 
+    private fun writeExifMetadata(
+        uri: Uri,
+        width: Int,
+        height: Int,
+        timestampMs: Long,
+        zoomRatio: Float
+    ) {
+        try {
+            contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                val exifDate = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(timestampMs))
+                exif.setAttribute(ExifInterface.TAG_DATETIME, exifDate)
+                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDate)
+                exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, exifDate)
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                exif.setAttribute(ExifInterface.TAG_MAKE, Build.MANUFACTURER)
+                exif.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
+                exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Camera Android ${Build.VERSION.RELEASE}")
+                exif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, width.toString())
+                exif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, height.toString())
+                exif.setAttribute(
+                    ExifInterface.TAG_DIGITAL_ZOOM_RATIO,
+                    String.format(Locale.US, "%.2f", zoomRatio)
+                )
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to write EXIF metadata: ${e.message}")
+        }
+    }
+
     companion object {
         /**
-         * Builds an Android ColorMatrix combining a Film/Travel/Cinema LUT, a Cinema Log Profile,
+         * Builds an Android ColorMatrix combining an optional creative LUT, a Cinema Log Profile,
          * and fine adjustment multipliers.
          */
         fun buildCombinedColorMatrix(

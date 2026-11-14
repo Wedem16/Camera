@@ -78,15 +78,33 @@ enum class PhotoResolutionSetting(
     val targetLongEdgePx: Int,
     val targetShortEdgePx: Int
 ) {
-    ULTRA_HD_200MP("200MP", "200MP 1/1.4\" OIS Main Camera (4608×3456)", 100, 4608, 3456),
-    ULTRA_HD_50MP("UHD 50MP", "50MP Adaptive Pixel Master (4096×3072)", 100, 4096, 3072),
+    ULTRA_HD_200MP("MAX MP", "Native Sensor Max Resolution (Unchanged JPEG)", 100, 4608, 3456),
+    ULTRA_HD_50MP("50MP", "High Resolution (4096×3072)", 100, 4096, 3072),
     UHD_4K("4K UHD", "4K Ultra HD (3840×2160)", 100, 3840, 2160),
-    HD_12MP("12MP UW", "12MP Ultra-Wide / Dual Pixel (3264×2448)", 98, 3264, 2448)
+    HD_12MP("12MP", "12MP Standard (3264×2448)", 98, 3264, 2448)
 }
 
 /**
- * Dedicated per-focal-length Zoom Processing & ISP Optimization Profiles
- * tuned for the 200MP 1/1.4" OIS Main + 12MP Ultra-Wide + Snapdragon 7 Gen 4 ISP.
+ * Optional On-Device AI Super-Resolution Upscale Mode.
+ * Always saves the unchanged original JPEG first, and when 2x or 4x is selected,
+ * generates a separate `_AI2x.jpg` or `_AI4x.jpg` file on `Dispatchers.Default`.
+ */
+enum class AiUpscaleMode(
+    val shortLabel: String,
+    val fullTitle: String,
+    val scaleFactor: Int,
+    val fileSuffix: String
+) {
+    ORIGINAL("Original", "Original (Unchanged Native JPEG)", 1, ""),
+    UPSCALE_2X("AI Upscale 2x", "Original + Separate 2x Super-Res (_AI2x.jpg)", 2, "_AI2x"),
+    UPSCALE_4X("AI Upscale 4x", "Original + Separate 4x Super-Res (_AI4x.jpg)", 4, "_AI4x");
+
+    val uiLabel: String get() = shortLabel
+}
+
+/**
+ * Optical & Hardware Multi-Camera Zoom Profiles.
+ * Uses neutral 1.0f multipliers so native captures are never smeared or artificially oversharpened.
  */
 enum class ZoomOptimizationProfile(
     val badgeLabel: String,
@@ -99,64 +117,64 @@ enum class ZoomOptimizationProfile(
     val microDetailContrast: Float
 ) {
     ULTRAWIDE_12MP_0_6X(
-        badgeLabel = "0.6x 12MP ULTRA-WIDE",
-        sensorLabel = "12MP Ultra-Wide Camera (0.6x)",
-        pipelineSummary = "12MP Ultra-Wide sensor • Edge distortion guard & balanced HDR dynamic range",
-        contrastMultiplier = 1.03f,
-        saturationMultiplier = 1.04f,
-        shadowLiftOffset = 2f,
-        microDetailOverlayAlpha = 18,
-        microDetailContrast = 1.18f
+        badgeLabel = "0.6x Ultra-Wide",
+        sensorLabel = "Ultra-Wide Physical Lens",
+        pipelineSummary = "Optical ultra-wide lens • Native StreamConfigurationMap output",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     ),
     NATIVE_200MP_1X(
-        badgeLabel = "1x 200MP 1/1.4\" OIS",
-        sensorLabel = "200MP Main Camera (1/1.4\" Sensor • OIS)",
-        pipelineSummary = "Original 200MP sensor • Natural details, organic sharpness, accurate colors & low noise",
-        contrastMultiplier = 1.03f,
-        saturationMultiplier = 1.03f,
-        shadowLiftOffset = 2f,
-        microDetailOverlayAlpha = 16,
-        microDetailContrast = 1.16f
+        badgeLabel = "1x Main Wide",
+        sensorLabel = "Main Wide Sensor • OIS",
+        pipelineSummary = "Unchanged native JPEG • FAST NR & Edge mode (no foliage smearing)",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     ),
     SENSOR_CROP_2X(
-        badgeLabel = "2x 200MP IN-SENSOR CROP",
-        sensorLabel = "200MP In-Sensor 2x Lossless Crop • OIS",
-        pipelineSummary = "High-quality 200MP sensor cropping with intelligent noise reduction & detail preservation",
-        contrastMultiplier = 1.05f,
-        saturationMultiplier = 1.03f,
-        shadowLiftOffset = 3f,
-        microDetailOverlayAlpha = 22,
-        microDetailContrast = 1.22f
+        badgeLabel = "2x Optical / In-Sensor",
+        sensorLabel = "2x Optical / In-Sensor Zoom",
+        pipelineSummary = "Hardware CameraControl.setZoomRatio(2.0x) without software crop-upscale",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     ),
     DEDICATED_3X_SUPER_RES(
-        badgeLabel = "3x MULTI-FRAME SUPER-RES",
-        sensorLabel = "Dedicated 3x Optimization Profile • OIS",
-        pipelineSummary = "Multi-frame super-res • Advanced NR • Natural detail & texture preservation • Adaptive edge clarity & low-light boost",
-        contrastMultiplier = 1.07f,
-        saturationMultiplier = 1.04f,
-        shadowLiftOffset = 5f,
-        microDetailOverlayAlpha = 28,
-        microDetailContrast = 1.26f
+        badgeLabel = "3x Telephoto",
+        sensorLabel = "Physical Telephoto / Optical Zoom",
+        pipelineSummary = "Physical telephoto lens (>2x) or optical CameraControl zoom",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     ),
     DIGITAL_RECONSTRUCTION_4X_5X(
-        badgeLabel = "4x–5x AI RECONSTRUCTION",
-        sensorLabel = "4x–5x Intelligent Reconstruction • OIS",
-        pipelineSummary = "Advanced digital zoom enhancement & intelligent sub-pixel image reconstruction",
-        contrastMultiplier = 1.06f,
-        saturationMultiplier = 1.03f,
-        shadowLiftOffset = 3f,
-        microDetailOverlayAlpha = 25,
-        microDetailContrast = 1.24f
+        badgeLabel = "5x Telephoto",
+        sensorLabel = "Physical Telephoto / Optical Zoom",
+        pipelineSummary = "Physical telephoto lens routing + hardware zoom (no software center-crop)",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     ),
     NATURAL_TELEPHOTO_10X(
-        badgeLabel = "10x NATURAL TELEPHOTO",
-        sensorLabel = "10x Natural Telephoto Engine • OIS",
-        pipelineSummary = "Prioritizes realistic details • Minimizes digital noise, watercolor artifacts & artificial oversharpening",
-        contrastMultiplier = 1.04f,
-        saturationMultiplier = 1.02f,
-        shadowLiftOffset = 2f,
-        microDetailOverlayAlpha = 19,
-        microDetailContrast = 1.18f
+        badgeLabel = "10x Zoom",
+        sensorLabel = "Telephoto Hardware Zoom",
+        pipelineSummary = "Hardware telephoto zoom with natural edge & noise settings",
+        contrastMultiplier = 1.0f,
+        saturationMultiplier = 1.0f,
+        shadowLiftOffset = 0f,
+        microDetailOverlayAlpha = 0,
+        microDetailContrast = 1.0f
     );
 
     companion object {
@@ -394,8 +412,8 @@ enum class PhotoFilterPreset(
     AMALFI_COAST("Amalfi Summer", LutCategory.TRAVEL, 1.04f, 1.20f, 20f, 9f, 1.07f, 1.03f, 0.92f),
     HAVANA_RETRO("Havana Sun Ochre", LutCategory.TRAVEL, 1.12f, 1.10f, 24f, 4f, 1.09f, 1.01f, 0.89f),
 
-    // Cinema & Blockbuster LUTs
-    VIVID_GALAXY("Galaxy Vivid HDR", LutCategory.CINEMA, 1.12f, 1.32f, 4f, 4f, 1.04f, 1.02f, 1.04f),
+    // Cinema & Blockbuster LUTs (Disabled by default; optional in Settings)
+    VIVID_GALAXY("Natural Vivid", LutCategory.CINEMA, 1.06f, 1.12f, 2f, 2f, 1.02f, 1.01f, 1.02f),
     CINEMA_TEAL("Teal & Orange Cine", LutCategory.CINEMA, 1.18f, 1.12f, -6f, -4f, 1.06f, 0.98f, 1.06f),
     COOL_CYBER("Cyberpunk 2099", LutCategory.CINEMA, 1.20f, 1.25f, -24f, 0f, 1.05f, 0.93f, 1.15f),
     WARM_AMBER("IMAX 70mm Gold", LutCategory.CINEMA, 1.22f, 1.10f, 22f, -2f, 1.09f, 1.01f, 0.88f),
@@ -473,15 +491,21 @@ data class HardwareCapabilities(
     val supportsVideoStabilization: Boolean = true,
     val hasOpticalImageStabilization: Boolean = true,
     val supportsManualSensor: Boolean = true,
+    val supportsRawCapability: Boolean = false,
+    val physicalCameraIds: List<String> = emptyList(),
+    val telephotoPhysicalCameraId: String? = null,
+    val ultraWidePhysicalCameraId: String? = null,
+    val maxNativeJpegWidth: Int = 4096,
+    val maxNativeJpegHeight: Int = 3072,
     val minExposureIndex: Int = -8,
     val maxExposureIndex: Int = 8,
     val exposureStepEv: Float = 0.25f,
     val minFocusDistanceDiopters: Float = 10.0f,
     val hardwareLevelLabel: String = "LEVEL_3",
-    val mainSensorSpec: String = "200MP 1/1.4\" ISOCELL • OIS",
-    val ultraWideSensorSpec: String = "12MP Ultra-Wide (0.6x)",
-    val socPlatformSpec: String = "Snapdragon 7 Gen 4 ISP",
-    val osPlatformSpec: String = "Android 16 • MagicOS 10"
+    val mainSensorSpec: String = "Main Wide Camera • OIS",
+    val ultraWideSensorSpec: String = "Ultra-Wide Camera",
+    val socPlatformSpec: String = "Honor / MagicOS Camera2 HAL",
+    val osPlatformSpec: String = "Android 14+ / MagicOS"
 )
 
 enum class SceneCategory(
@@ -491,14 +515,14 @@ enum class SceneCategory(
     val contrastBoost: Float,
     val warmthShift: Float
 ) {
-    AUTO("Smart Auto", "Balanced Galaxy Color Science", 1.05f, 1.03f, 0f),
-    NIGHT_LOW_LIGHT("Night Scene", "Multi-frame Shadow & Noise Optimization", 1.12f, 1.10f, 4f),
-    PORTRAIT_SUBJECT("Portrait Studio", "Natural Skin Tone & Depth Separation", 1.04f, 1.02f, 6f),
-    LANDSCAPE_NATURE("Vivid Landscape", "Enhanced Sky Blues & Foliage Greens", 1.22f, 1.08f, 2f),
-    FOOD_CULINARY("Gourmet Food", "Rich Warmth & Crisp Texture Pop", 1.25f, 1.08f, 14f),
-    SUNSET_GOLDEN("Golden Hour", "Amber Horizon & Highlight Recovery", 1.20f, 1.06f, 18f),
-    HIGH_CONTRAST_HDR("Backlit HDR", "Dynamic Shadow Lift & Highlight Guard", 1.10f, 1.15f, 0f),
-    MACRO_DETAIL("Close-Up Detail", "Micro-Contrast & Edge Crispness", 1.08f, 1.12f, 0f)
+    AUTO("Neutral Auto", "Unchanged Native Sensor Color", 1.0f, 1.0f, 0f),
+    NIGHT_LOW_LIGHT("Night Scene", "Multi-frame Shadow & Noise Optimization", 1.04f, 1.04f, 2f),
+    PORTRAIT_SUBJECT("Portrait Studio", "Natural Skin Tone & Depth Separation", 1.02f, 1.01f, 3f),
+    LANDSCAPE_NATURE("Landscape", "Natural Sky & Foliage Detail", 1.04f, 1.03f, 0f),
+    FOOD_CULINARY("Culinary", "Natural Warmth & Crisp Texture", 1.06f, 1.04f, 6f),
+    SUNSET_GOLDEN("Golden Hour", "Amber Horizon & Highlight Recovery", 1.06f, 1.03f, 8f),
+    HIGH_CONTRAST_HDR("Backlit HDR", "Dynamic Shadow Lift & Highlight Guard", 1.03f, 1.06f, 0f),
+    MACRO_DETAIL("Close-Up Detail", "Micro-Contrast & Edge Crispness", 1.03f, 1.04f, 0f)
 }
 
 data class RealTimeSceneMetrics(
@@ -547,13 +571,22 @@ data class MediaItem(
     val mimeType: String = "image/jpeg"
 ) {
     val formattedResolution: String
-        get() = if (width > 0 && height > 0) "${width}×${height}" else "4K UHD"
+        get() = if (width > 0 && height > 0) "${width}×${height}" else "Native"
 
     val formattedSize: String
         get() {
             val mb = sizeBytes / (1024f * 1024f)
             return if (mb >= 1f) String.format("%.1f MB", mb)
             else String.format("%d KB", (sizeBytes / 1024L).coerceAtLeast(1L))
+        }
+
+    val variantBadge: String
+        get() = when {
+            isVideo -> "VIDEO"
+            displayName.contains("_AI4x", ignoreCase = true) -> "AI UPSCALE 4x"
+            displayName.contains("_AI2x", ignoreCase = true) -> "AI UPSCALE 2x"
+            displayName.endsWith(".dng", ignoreCase = true) -> "RAW DNG"
+            else -> "ORIGINAL"
         }
 }
 

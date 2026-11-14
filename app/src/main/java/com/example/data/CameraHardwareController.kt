@@ -4,8 +4,10 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
@@ -13,6 +15,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
+import android.util.Size
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -66,8 +69,52 @@ class CameraHardwareController(private val context: Context) {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
     private var boundPreviewView: PreviewView? = null
+    private var lastInspectedCapabilities: HardwareCapabilities = HardwareCapabilities()
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    /**
+     * Queries Camera2 StreamConfigurationMap for the highest-resolution native JPEG output size
+     * supported by the active back/front lens so ImageCapture targets the sensor's true maximum output.
+     */
+    private fun queryMaxNativeJpegSize(lensFacing: Int): Size? {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                ?: return null
+            val targetCamera2Facing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+            var bestSize: Size? = null
+            for (cameraId in cameraManager.cameraIdList) {
+                val chars = cameraManager.getCameraCharacteristics(cameraId)
+                val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                if (facing == targetCamera2Facing) {
+                    val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    val jpegSizes: List<Size> = map?.getOutputSizes(ImageFormat.JPEG)?.toList().orEmpty()
+                    val highResSizes: List<Size> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        map?.getHighResolutionOutputSizes(ImageFormat.JPEG)?.toList().orEmpty()
+                    } else {
+                        emptyList()
+                    }
+                    val allSizes: List<Size> = jpegSizes + highResSizes
+                    val maxForCamera = allSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
+                    if (maxForCamera != null) {
+                        val currentPixels = (bestSize?.width?.toLong() ?: 0L) * (bestSize?.height?.toLong() ?: 0L)
+                        val candidatePixels = maxForCamera.width.toLong() * maxForCamera.height.toLong()
+                        if (candidatePixels > currentPixels) {
+                            bestSize = maxForCamera
+                        }
+                    }
+                }
+            }
+            bestSize
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to query StreamConfigurationMap JPEG sizes: ${e.message}")
+            null
+        }
+    }
 
     fun bindCamera(
         lifecycleOwner: LifecycleOwner,
@@ -120,6 +167,8 @@ class CameraHardwareController(private val context: Context) {
                     it.surfaceProvider = previewView.surfaceProvider
                 }
 
+                val maxNativeSize = queryMaxNativeJpegSize(resolvedLens)
+
                 val camera: Camera
                 if (isVideoMode) {
                     val qualityList = if (videoResolution == VideoResolutionSetting.UHD_4K) {
@@ -154,19 +203,45 @@ class CameraHardwareController(private val context: Context) {
                         vidCapture
                     )
                     onDiagnosticLog(
-                        "4K-VIDEO",
+                        "VIDEO",
                         "Bound 2-Stream ${videoResolution.shortLabel} @ ${videoFps.fps}fps | Bitrate: ${videoBitrateMbps} Mbps"
                     )
                 } else {
+                    val resolutionStrategy = if (maxNativeSize != null) {
+                        ResolutionStrategy(
+                            maxNativeSize,
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                        )
+                    } else {
+                        ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
+                    }
                     val highestResSelector = ResolutionSelector.Builder()
-                        .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                        .setResolutionStrategy(resolutionStrategy)
                         .build()
 
-                    val imgCapture = ImageCapture.Builder()
+                    val imgCaptureBuilder = ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                         .setResolutionSelector(highestResSelector)
                         .setFlashMode(mapFlashMode(flashSetting))
-                        .build()
+                        .setJpegQuality(100)
+
+                    // Set CaptureRequest.NOISE_REDUCTION_MODE and EDGE_MODE to FAST on ImageCapture
+                    // so the vendor HAL does NOT apply oil-painting denoise or harsh halo oversharpening on foliage.
+                    Camera2Interop.Extender(imgCaptureBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.NOISE_REDUCTION_MODE,
+                            CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.EDGE_MODE,
+                            CameraMetadata.EDGE_MODE_FAST
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.JPEG_QUALITY,
+                            100.toByte()
+                        )
+
+                    val imgCapture = imgCaptureBuilder.build()
                     imageCapture = imgCapture
                     videoCapture = null
 
@@ -193,20 +268,21 @@ class CameraHardwareController(private val context: Context) {
                             imgCapture
                         )
                     }
-                    val resInfo = imgCapture.resolutionInfo?.resolution
+                    val resInfo = imgCapture.resolutionInfo?.resolution ?: maxNativeSize
                     onDiagnosticLog(
-                        "4K-PHOTO",
-                        "Bound Max-Res Sensor (${resInfo?.width ?: 3840}×${resInfo?.height ?: 2160} -> 4K + AI Super-Res Zoom)"
+                        "CAPTURE-CFG",
+                        "Bound Native Sensor (${resInfo?.width ?: 4096}×${resInfo?.height ?: 3072}) | NR=FAST | EDGE=FAST | Quality=MAX"
                     )
                 }
 
                 boundCamera = camera
 
-                val capabilities = inspectCapabilities(camera, hasBack, hasFront)
+                val capabilities = inspectCapabilities(camera, hasBack, hasFront, maxNativeSize)
+                lastInspectedCapabilities = capabilities
                 onHardwareInspected(capabilities)
                 onDiagnosticLog(
                     "SENSOR",
-                    "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | HW Zoom=${capabilities.sensorMinZoomRatio}x..${capabilities.sensorMaxZoomRatio}x | Hybrid=0.6x..10x"
+                    "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | Optical=${capabilities.sensorMinZoomRatio}x..${capabilities.sensorMaxZoomRatio}x | PhysIDs=${capabilities.physicalCameraIds} | TeleID=${capabilities.telephotoPhysicalCameraId ?: "none"} | RAW=${capabilities.supportsRawCapability}"
                 )
 
                 applyCamera2Parameters(proSettings, videoStabilizationEnabled)
@@ -221,7 +297,8 @@ class CameraHardwareController(private val context: Context) {
     private fun inspectCapabilities(
         camera: Camera,
         hasRear: Boolean,
-        hasFront: Boolean
+        hasFront: Boolean,
+        maxNativeSize: Size?
     ): HardwareCapabilities {
         val info = camera.cameraInfo
         val zoomState = info.zoomState.value
@@ -229,6 +306,7 @@ class CameraHardwareController(private val context: Context) {
         val sensorMaxZ = (zoomState?.maxZoomRatio ?: 8.0f).coerceAtLeast(1.0f)
 
         val camera2Info = runCatching { Camera2CameraInfo.from(info) }.getOrNull()
+        val cameraId = runCatching { camera2Info?.cameraId }.getOrNull()
         val hwLevel = camera2Info?.getCameraCharacteristic(
             CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL
         ) ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED
@@ -261,22 +339,81 @@ class CameraHardwareController(private val context: Context) {
             it == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
         } ?: true
 
+        val availableCapabilities = camera2Info?.getCameraCharacteristic(
+            CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
+        ) ?: IntArray(0)
+        val supportsRaw = availableCapabilities.contains(
+            CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW
+        )
+
+        // Inspect logical multi-camera physical IDs (telephoto vs ultra-wide vs main wide)
+        var physicalIds = emptyList<String>()
+        var telephotoPhysId: String? = null
+        var ultraWidePhysId: String? = null
+
+        try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            if (cameraManager != null && cameraId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val logicalChars = cameraManager.getCameraCharacteristics(cameraId)
+                val primaryFocal = logicalChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    ?.firstOrNull() ?: 4.7f
+                val physSet = logicalChars.physicalCameraIds
+                physicalIds = physSet.toList()
+
+                var maxTeleFocal = primaryFocal
+                var minUwFocal = primaryFocal
+
+                for (physId in physSet) {
+                    val physChars = runCatching {
+                        cameraManager.getCameraCharacteristics(physId)
+                    }.getOrNull() ?: continue
+                    val focal = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?.firstOrNull() ?: continue
+                    if (focal > maxTeleFocal * 1.25f) {
+                        maxTeleFocal = focal
+                        telephotoPhysId = physId
+                    } else if (focal < minUwFocal * 0.85f) {
+                        minUwFocal = focal
+                        ultraWidePhysId = physId
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Physical multi-camera inspection skipped: ${e.message}")
+        }
+
         val expState = info.exposureState
         val expRange = expState.exposureCompensationRange
         val expStep = expState.exposureCompensationStep.toFloat().let { if (it <= 0f) 0.25f else it }
 
-        val presets = listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)
+        val presets = buildList {
+            if (sensorMinZ < 0.9f || ultraWidePhysId != null) add(0.6f) else add(0.6f)
+            add(1.0f)
+            add(2.0f)
+            add(3.0f)
+            add(5.0f)
+            add(10.0f)
+        }
+
+        val resW = maxNativeSize?.width ?: 4096
+        val resH = maxNativeSize?.height ?: 3072
 
         return HardwareCapabilities(
             hasRearCamera = hasRear,
             hasFrontCamera = hasFront,
             hasFlashUnit = info.hasFlashUnit(),
-            minZoomRatio = 0.6f, // Full 0.6x 12MP Ultra-Wide to 10x Hybrid Super-Resolution range
+            minZoomRatio = 0.6f,
             maxZoomRatio = 10.0f,
             sensorMinZoomRatio = sensorMinZ,
             sensorMaxZoomRatio = sensorMaxZ,
             zoomPresets = presets,
-            supportsUltraWideOptical = sensorMinZ < 0.9f,
+            supportsUltraWideOptical = sensorMinZ < 0.9f || ultraWidePhysId != null,
+            supportsRawCapability = supportsRaw,
+            physicalCameraIds = physicalIds,
+            telephotoPhysicalCameraId = telephotoPhysId,
+            ultraWidePhysicalCameraId = ultraWidePhysId,
+            maxNativeJpegWidth = resW,
+            maxNativeJpegHeight = resH,
             supports4K = true,
             supports60Fps = true,
             supportsVideoStabilization = supportsStab,
@@ -287,17 +424,24 @@ class CameraHardwareController(private val context: Context) {
             exposureStepEv = expStep,
             minFocusDistanceDiopters = minFocusDist.coerceAtLeast(1.0f),
             hardwareLevelLabel = hwLevelLabel,
-            mainSensorSpec = "200MP 1/1.4\" ISOCELL • OIS",
-            ultraWideSensorSpec = "12MP Ultra-Wide (0.6x)",
-            socPlatformSpec = "Snapdragon 7 Gen 4 ISP",
-            osPlatformSpec = "Android 16 • MagicOS 10"
+            mainSensorSpec = "Main Wide (${resW}×${resH})${if (supportsOis) " • OIS" else ""}",
+            ultraWideSensorSpec = if (sensorMinZ < 0.9f || ultraWidePhysId != null) {
+                "Optical Ultra-Wide (${String.format(Locale.US, "%.1fx", sensorMinZ)})"
+            } else {
+                "1x Wide Native (No 0.6x physical UW exposed)"
+            },
+            socPlatformSpec = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.HARDWARE})",
+            osPlatformSpec = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
         )
     }
 
     /**
-     * Applies hardware zoom up to the sensor's native limit and returns the remaining
-     * hybrid magnification factor (for 0.6x ultra-wide framing or 3x/5x/10x super-resolution zoom)
-     * so 0.6x, 1x, 2x, 3x, 5x, and 10x ALWAYS work on every Android device.
+     * Applies optical/logical zoom via CameraControl.setZoomRatio().
+     * - When zoom > 2.0f and a physical telephoto lens is exposed by CameraManager logical multi-camera,
+     *   Android's logical camera HAL automatically hands off to the telephoto physical lens (or we request
+     *   physical stream routing on API 28+).
+     * - Never scales PreviewView or returns a software crop-upscale factor by default (`return 1.0f`),
+     *   avoiding center-crop + upscale degradation.
      */
     fun setZoomRatio(requestedRatio: Float): Float {
         val target = requestedRatio.coerceIn(0.6f, 10.0f)
@@ -309,30 +453,15 @@ class CameraHardwareController(private val context: Context) {
         val hardwareTarget = target.coerceIn(sensorMin, sensorMax)
         camera.cameraControl.setZoomRatio(hardwareTarget)
 
-        val previewView = boundPreviewView
-        return when {
-            target > sensorMax -> {
-                // Hybrid Super-Resolution Zoom beyond sensor max (e.g. 10x when hardware max is 4x or 8x)
-                val extraScale = (target / sensorMax).coerceIn(1.0f, 4.0f)
-                previewView?.scaleType = PreviewView.ScaleType.FILL_CENTER
-                previewView?.scaleX = extraScale
-                previewView?.scaleY = extraScale
-                extraScale
-            }
-            target < sensorMin -> {
-                // 0.6x 12MP Ultra-Wide framing when sensor minZoomRatio is 1.0x
-                previewView?.scaleType = PreviewView.ScaleType.FIT_CENTER
-                previewView?.scaleX = 0.92f
-                previewView?.scaleY = 0.92f
-                target / sensorMin
-            }
-            else -> {
-                previewView?.scaleType = PreviewView.ScaleType.FILL_CENTER
-                previewView?.scaleX = 1.0f
-                previewView?.scaleY = 1.0f
-                1.0f
-            }
+        // Ensure PreviewView stays at 1.0x un-stretched scale (no artificial digital preview stretch)
+        boundPreviewView?.let { pv ->
+            pv.scaleType = PreviewView.ScaleType.FILL_CENTER
+            pv.scaleX = 1.0f
+            pv.scaleY = 1.0f
         }
+
+        // Return 1.0f so MediaGalleryRepository saves the native optical/ISP output without center-cropping.
+        return 1.0f
     }
 
     fun setFlashSetting(setting: FlashSetting) {
@@ -370,6 +499,12 @@ class CameraHardwareController(private val context: Context) {
         camera.cameraControl.setExposureCompensationIndex(clamped)
     }
 
+    /**
+     * Configures Camera2 CaptureRequest options:
+     * - Keeps AWB, AE, and AF on automatic unless overridden in Pro Mode.
+     * - Sets NOISE_REDUCTION_MODE and EDGE_MODE to FAST so foliage, grass, and fine text are never
+     *   smeared into an oil-painting / watercolor texture.
+     */
     fun applyCamera2Parameters(
         proSettings: ProCameraSettings,
         videoStabilizationEnabled: Boolean
@@ -420,9 +555,14 @@ class CameraHardwareController(private val context: Context) {
                 proSettings.shutterSpeedNs?.let {
                     optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, it)
                 }
+            } else {
+                optionsBuilder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE,
+                    CaptureRequest.CONTROL_AE_MODE_ON
+                )
             }
 
-            // Optical Image Stabilization (OIS) + EIS Video Stabilization
+            // Optical Image Stabilization (OIS) + Video Stabilization
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                 if (videoStabilizationEnabled) {
@@ -440,15 +580,16 @@ class CameraHardwareController(private val context: Context) {
                 }
             )
 
-            // Snapdragon 7 Gen 4 Natural ISP Tuning: High-Quality Noise Reduction & Edge Definition
-            // Avoids watercolor smoothing and harsh halo oversharpening
+            // CRITICAL FIX FOR HONOR 600 / MAGICOS FOLIAGE QUALITY:
+            // Set NOISE_REDUCTION_MODE and EDGE_MODE to FAST instead of HIGH_QUALITY.
+            // HIGH_QUALITY triggers heavy vendor denoise + halo sharpening that makes leaves look smeared.
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.NOISE_REDUCTION_MODE,
-                CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                CameraMetadata.NOISE_REDUCTION_MODE_FAST
             )
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.EDGE_MODE,
-                CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                CameraMetadata.EDGE_MODE_FAST
             )
 
             camera2Control.setCaptureRequestOptions(optionsBuilder.build())
@@ -549,16 +690,14 @@ class CameraHardwareController(private val context: Context) {
         }
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val formatTag = videoFormat.shortLabel.replace(' ', '_')
-        val resTag = videoResolution.shortLabel.replace(' ', '_')
         val contentValues = ContentValues().apply {
             put(
                 MediaStore.MediaColumns.DISPLAY_NAME,
-                "GALAXY_${resTag}_${formatTag}_${videoBitrateMbps}Mbps_$timestamp.${videoFormat.fileExtension}"
+                "VID_$timestamp.${videoFormat.fileExtension}"
             )
             put(MediaStore.MediaColumns.MIME_TYPE, videoFormat.mimeType)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/GalaxyHDCamera")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Camera")
             }
         }
 
@@ -624,7 +763,7 @@ class CameraHardwareController(private val context: Context) {
                         val mb = recordEvent.recordingStats.numBytesRecorded / (1024f * 1024f)
                         onDiagnosticLog(
                             "MEDIASTORE",
-                            "Saved ${videoFormat.shortLabel} (${String.format("%.1f MB", mb)}) -> ${recordEvent.outputResults.outputUri}"
+                            "Saved ${videoFormat.shortLabel} (${String.format(Locale.US, "%.1f MB", mb)}) -> ${recordEvent.outputResults.outputUri}"
                         )
                         onEvent(VideoRecordStatus.Finalized(recordEvent.outputResults.outputUri))
                     } else {

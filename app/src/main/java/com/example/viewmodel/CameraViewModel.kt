@@ -3,6 +3,7 @@ package com.example.viewmodel
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import androidx.camera.core.CameraSelector
 import androidx.camera.view.PreviewView
 import androidx.compose.ui.geometry.Offset
@@ -13,8 +14,10 @@ import com.example.R
 import com.example.data.AiSceneOptimizerRepository
 import com.example.data.CameraHardwareController
 import com.example.data.MediaGalleryRepository
+import com.example.data.OnDeviceSuperResolutionEngine
 import com.example.data.VideoRecordStatus
 import com.example.model.AiCoachUiState
+import com.example.model.AiUpscaleMode
 import com.example.model.AspectRatioSetting
 import com.example.model.CameraMode
 import com.example.model.CropAspectPreset
@@ -80,21 +83,27 @@ data class CameraUiState(
     val activeCountdownSec: Int = 0,
     val photoResolution: PhotoResolutionSetting = PhotoResolutionSetting.UHD_4K,
     val photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG,
-    val aspectRatio: AspectRatioSetting = AspectRatioSetting.RATIO_9_16,
+    val aspectRatio: AspectRatioSetting = AspectRatioSetting.RATIO_FULL,
     val videoResolution: VideoResolutionSetting = VideoResolutionSetting.UHD_4K,
     val videoFormat: VideoFormatSetting = VideoFormatSetting.MP4_AVC,
     val videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
-    val videoBitrateMbps: Int = 250, // Adjustable from 10 Mbps up to 1000 Mbps
+    val videoBitrateMbps: Int = 250,
+    // Step 3: Creative LUTs & watermarks are OFF by default (neutral color, no fake overlays)
+    val creativeFiltersEnabled: Boolean = false,
     val activeLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
     val lutIntensity: Float = 1.0f,
     val selectedLutCategory: LutCategory = LutCategory.ALL,
     val activeLogProfile: LogProfile = LogProfile.STANDARD_REC709,
     val videoStabilizationEnabled: Boolean = true,
     val gridLinesEnabled: Boolean = true,
-    val watermarkEnabled: Boolean = true,
+    val watermarkEnabled: Boolean = false,
     val volumeButtonShutterEnabled: Boolean = true,
-    val aiSceneOptimizerEnabled: Boolean = true,
-    val aiZoomAutoEnhanceEnabled: Boolean = true,
+    val aiSceneOptimizerEnabled: Boolean = false,
+    // Step 5: Optional On-Device AI Upscale mode (Original / AI Upscale 2x / AI Upscale 4x)
+    val aiUpscaleMode: AiUpscaleMode = AiUpscaleMode.ORIGINAL,
+    val isUpscalingInProgress: Boolean = false,
+    val upscaleProgressPercent: Int = 0,
+    val aiZoomAutoEnhanceEnabled: Boolean = false,
     val currentZoomRatio: Float = 1.0f,
     val extraHybridZoomFactor: Float = 1.0f,
     val portraitBlurStrength: Float = 0.65f,
@@ -128,6 +137,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val hardwareController = CameraHardwareController(application)
     private val aiRepository = AiSceneOptimizerRepository()
     private val galleryRepository = MediaGalleryRepository(application)
+    private val srEngine = OnDeviceSuperResolutionEngine(application)
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -144,7 +154,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     init {
         appendDiagnosticLog(
             "INIT",
-            "200MP 1/1.4\" OIS + 12MP UW | Snapdragon 7 Gen 4 | Android 16 / MagicOS 10"
+            "Device=${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) | NR=FAST, EDGE=FAST"
         )
         refreshGallery()
     }
@@ -171,7 +181,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleDiagnosticLogsOverlay() {
         val next = !_uiState.value.showDiagnosticLogsOverlay
         _uiState.update { it.copy(showDiagnosticLogsOverlay = next) }
-        showStatusBanner(if (next) "Live Pro Telemetry & Logs HUD ON" else "Live Pro Logs HUD OFF")
+        showStatusBanner(if (next) "Camera Telemetry & Logs HUD ON" else "Camera Logs HUD OFF")
     }
 
     fun onPermissionsUpdated(cameraGranted: Boolean, audioGranted: Boolean) {
@@ -266,14 +276,35 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(showBitrateSheet = visible) }
     }
 
-    // LUT & Cinema Log Controls
+    // Step 3: Creative LUT & Log Controls (Gated behind Settings toggle, default OFF / neutral color)
+    fun toggleCreativeFilters() {
+        val next = !_uiState.value.creativeFiltersEnabled
+        _uiState.update {
+            it.copy(
+                creativeFiltersEnabled = next,
+                activeLut = if (next) it.activeLut else PhotoFilterPreset.ORIGINAL,
+                activeLogProfile = if (next) it.activeLogProfile else LogProfile.STANDARD_REC709
+            )
+        }
+        appendDiagnosticLog("FILTERS", "Creative LUT & Log Filters -> ${if (next) "ENABLED" else "OFF (Neutral)"}")
+        showStatusBanner(
+            if (next) "Creative Filters & LUTs Enabled"
+            else "Creative Filters OFF (Neutral Color)"
+        )
+    }
+
     fun selectLutCategory(category: LutCategory) {
         _uiState.update { it.copy(selectedLutCategory = category) }
     }
 
     fun selectActiveLut(lut: PhotoFilterPreset) {
-        _uiState.update { it.copy(activeLut = lut) }
-        appendDiagnosticLog("LUT", "Applied LUT: ${lut.label} (${lut.category.label})")
+        _uiState.update {
+            it.copy(
+                activeLut = lut,
+                creativeFiltersEnabled = lut != PhotoFilterPreset.ORIGINAL || it.creativeFiltersEnabled
+            )
+        }
+        appendDiagnosticLog("LUT", "Selected LUT: ${lut.label} (${lut.category.label})")
         showStatusBanner("LUT: ${lut.label}")
     }
 
@@ -282,7 +313,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectLogProfile(profile: LogProfile) {
-        _uiState.update { it.copy(activeLogProfile = profile) }
+        _uiState.update {
+            it.copy(
+                activeLogProfile = profile,
+                creativeFiltersEnabled = profile != LogProfile.STANDARD_REC709 || it.creativeFiltersEnabled
+            )
+        }
         appendDiagnosticLog("LOG-CURVE", "Active Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
         showStatusBanner("Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
     }
@@ -294,7 +330,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val next = entries[(currentIdx + 1) % entries.size]
         _uiState.update { it.copy(photoFormat = next) }
         appendDiagnosticLog("FORMAT", "Photo Format -> ${next.fullTitle} (.${next.extension})")
-        showStatusBanner("Photo Format: ${next.fullTitle}")
+        if (next == PhotoFormatSetting.RAW_DNG && !_uiState.value.hardwareCapabilities.supportsRawCapability) {
+            showStatusBanner("RAW+JPG selected (Note: Sensor RAW capability not reported by Camera2; saves 100% JPEG + DNG container)")
+        } else {
+            showStatusBanner("Photo Format: ${next.fullTitle}")
+        }
     }
 
     fun cycleVideoFormat() {
@@ -306,15 +346,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         showStatusBanner("Video Format: ${next.fullTitle}")
     }
 
-    // AI Zoom Super-Resolution & Auto Quality Enhancer
-    fun toggleAiZoomAutoEnhance() {
-        val next = !_uiState.value.aiZoomAutoEnhanceEnabled
-        _uiState.update { it.copy(aiZoomAutoEnhanceEnabled = next) }
-        appendDiagnosticLog("AI-QUALITY", "AI Super-Resolution & Auto Quality Enhancer -> ${if (next) "ON" else "OFF"}")
+    // Step 5: Optional On-Device AI Upscale Mode ("Original" / "AI Upscale 2x" / "AI Upscale 4x")
+    fun cycleAiUpscaleMode() {
+        val entries = AiUpscaleMode.entries
+        val currentIdx = entries.indexOf(_uiState.value.aiUpscaleMode).coerceAtLeast(0)
+        val next = entries[(currentIdx + 1) % entries.size]
+        selectAiUpscaleMode(next)
+    }
+
+    fun selectAiUpscaleMode(mode: AiUpscaleMode) {
+        _uiState.update {
+            it.copy(
+                aiUpscaleMode = mode,
+                aiZoomAutoEnhanceEnabled = mode != AiUpscaleMode.ORIGINAL
+            )
+        }
+        appendDiagnosticLog("AI-UPSCALE", "AI Upscale Mode -> ${mode.uiLabel}")
         showStatusBanner(
-            if (next) "AI Super-Res Zoom & Auto Picture Quality ON"
-            else "AI Auto Picture Quality Enhancer OFF"
+            when (mode) {
+                AiUpscaleMode.ORIGINAL -> "Capture Mode: Original Only (Unchanged Native JPEG)"
+                AiUpscaleMode.UPSCALE_2X -> "AI Upscale 2x Active (Saves Original + Separate _AI2x.jpg)"
+                AiUpscaleMode.UPSCALE_4X -> "AI Upscale 4x Active (Saves Original + Separate _AI4x.jpg)"
+            }
         )
+    }
+
+    fun toggleAiZoomAutoEnhance() {
+        cycleAiUpscaleMode()
     }
 
     // Video Bitrate up to 1000 Mbps
@@ -400,10 +458,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cycleAspectRatio() {
         val next = when (_uiState.value.aspectRatio) {
-            AspectRatioSetting.RATIO_9_16 -> AspectRatioSetting.RATIO_3_4
-            AspectRatioSetting.RATIO_3_4 -> AspectRatioSetting.RATIO_1_1
+            AspectRatioSetting.RATIO_FULL -> AspectRatioSetting.RATIO_3_4
+            AspectRatioSetting.RATIO_3_4 -> AspectRatioSetting.RATIO_9_16
+            AspectRatioSetting.RATIO_9_16 -> AspectRatioSetting.RATIO_1_1
             AspectRatioSetting.RATIO_1_1 -> AspectRatioSetting.RATIO_FULL
-            AspectRatioSetting.RATIO_FULL -> AspectRatioSetting.RATIO_9_16
         }
         _uiState.update { it.copy(aspectRatio = next) }
         appendDiagnosticLog("ASPECT", "Aspect ratio -> ${next.label}")
@@ -418,8 +476,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             PhotoResolutionSetting.HD_12MP -> PhotoResolutionSetting.UHD_4K
         }
         _uiState.update { it.copy(photoResolution = next) }
-        appendDiagnosticLog("PHOTO-RES", "Photo resolution -> ${next.fullTitle}")
-        showStatusBanner("Photo Quality: ${next.fullTitle}")
+        appendDiagnosticLog("PHOTO-RES", "Photo resolution target -> ${next.fullTitle}")
+        showStatusBanner("Photo Output: ${next.fullTitle}")
     }
 
     fun toggleVideoResolution(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
@@ -451,13 +509,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(videoStabilizationEnabled = next) }
         hardwareController.applyCamera2Parameters(_uiState.value.proSettings, next)
         appendDiagnosticLog("OIS/EIS", "Optical Image Stabilization (OIS) + EIS -> $next")
-        showStatusBanner(if (next) "OIS + Super Steady Stabilization ON" else "OIS / Video Stabilization OFF")
+        showStatusBanner(if (next) "OIS + Video Stabilization ON" else "OIS / Video Stabilization OFF")
     }
 
     fun toggleAiSceneOptimizer() {
         val next = !_uiState.value.aiSceneOptimizerEnabled
         _uiState.update { it.copy(aiSceneOptimizerEnabled = next) }
-        showStatusBanner(if (next) "AI Scene Optimizer Enabled" else "AI Scene Optimizer Disabled")
+        showStatusBanner(if (next) "AI Scene Optimizer Enabled" else "AI Scene Optimizer Disabled (Neutral)")
     }
 
     fun toggleGridLines() {
@@ -465,7 +523,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleWatermark() {
-        _uiState.update { it.copy(watermarkEnabled = !it.watermarkEnabled) }
+        val next = !_uiState.value.watermarkEnabled
+        _uiState.update { it.copy(watermarkEnabled = next) }
+        showStatusBanner(if (next) "Timestamp Watermark Enabled" else "Watermark OFF (Clean Image)")
     }
 
     fun toggleVolumeButtonShutter() {
@@ -475,6 +535,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun setZoomRatio(ratio: Float) {
         val effective = ratio.coerceIn(0.6f, 10.0f)
         val extraScale = hardwareController.setZoomRatio(effective)
+        val caps = _uiState.value.hardwareCapabilities
         val profile = ZoomOptimizationProfile.fromZoomRatio(effective)
         _uiState.update {
             it.copy(
@@ -482,12 +543,26 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 extraHybridZoomFactor = extraScale
             )
         }
+
+        val lensRoutingNote = when {
+            effective > 2.0f && caps.telephotoPhysicalCameraId != null ->
+                "Physical Telephoto Lens (ID ${caps.telephotoPhysicalCameraId})"
+            effective > 2.0f ->
+                "Optical/HAL Zoom (${String.format(Locale.US, "%.1fx", effective.coerceIn(caps.sensorMinZoomRatio, caps.sensorMaxZoomRatio))}, no center-crop upscale)"
+            effective < 1.0f && caps.supportsUltraWideOptical ->
+                "Physical Ultra-Wide Lens"
+            effective < 1.0f ->
+                "1.0x Wide Native (0.6x physical UW not exposed to third-party apps)"
+            else ->
+                "Main Wide Native Sensor"
+        }
+
         appendDiagnosticLog(
-            "ZOOM-ISP",
-            "${profile.badgeLabel} | ${profile.pipelineSummary}"
+            "ZOOM",
+            "${profile.badgeLabel} -> $lensRoutingNote"
         )
         if (effective in listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)) {
-            showStatusBanner("${profile.badgeLabel}: ${profile.pipelineSummary}")
+            showStatusBanner("${profile.badgeLabel}: $lensRoutingNote")
         }
     }
 
@@ -629,6 +704,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Captures the photo from CameraX ImageCapture (`CAPTURE_MODE_MAXIMIZE_QUALITY`):
+     * 1. Always saves the unchanged original JPEG (`IMG_xxx.jpg`) to `Pictures/Camera/` first.
+     * 2. If `aiUpscaleMode` is `UPSCALE_2X` or `UPSCALE_4X`, runs tiled super-resolution on
+     *    `Dispatchers.Default` with live progress updates and saves a SEPARATE file
+     *    (`IMG_xxx_AI2x.jpg` or `IMG_xxx_AI4x.jpg`) without overwriting the original.
+     */
     fun executeImmediatePhotoCapture() {
         val state = _uiState.value
         if (state.isCapturingPhoto) return
@@ -641,7 +723,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         appendDiagnosticLog(
             "CAPTURE",
-            "Capturing ${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} | Zoom=${String.format("%.1fx", state.currentZoomRatio)} | AI-SR=${state.aiZoomAutoEnhanceEnabled}"
+            "Capturing Native ${state.photoFormat.badgeLabel} | Zoom=${String.format(Locale.US, "%.1fx", state.currentZoomRatio)} | Upscale=${state.aiUpscaleMode.uiLabel}"
         )
 
         viewModelScope.launch {
@@ -654,7 +736,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             isFrontLens = isFront,
             onBitmapCaptured = { capturedBitmap ->
                 viewModelScope.launch {
-                    val savedUri = galleryRepository.processAndSaveCapturedPhoto(
+                    val savedCapture = galleryRepository.processAndSaveCapturedPhoto(
                         rawBitmap = capturedBitmap,
                         mode = state.activeMode,
                         resolution = state.photoResolution,
@@ -664,8 +746,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         activeLut = state.activeLut,
                         lutIntensity = state.lutIntensity,
                         activeLogProfile = state.activeLogProfile,
+                        creativeFiltersEnabled = state.creativeFiltersEnabled,
                         aiSceneOptimizerEnabled = state.aiSceneOptimizerEnabled,
-                        aiZoomAutoEnhanceEnabled = state.aiZoomAutoEnhanceEnabled,
                         currentZoomRatio = state.currentZoomRatio,
                         extraHybridZoomFactor = state.extraHybridZoomFactor,
                         detectedScene = state.sceneMetrics.detectedScene,
@@ -674,18 +756,69 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         addWatermark = state.watermarkEnabled
                     )
                     _uiState.update { it.copy(isCapturingPhoto = false) }
-                    if (savedUri != null) {
-                        val aiTag = if (state.aiZoomAutoEnhanceEnabled) "AI Super-Res " else ""
+
+                    if (savedCapture != null) {
+                        val origW = savedCapture.originalBitmap.width
+                        val origH = savedCapture.originalBitmap.height
                         appendDiagnosticLog(
                             "MEDIASTORE",
-                            "Saved $aiTag${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} (${String.format("%.1fx", state.currentZoomRatio)}) -> $savedUri"
+                            "Saved Original IMG_${savedCapture.baseTimestamp}.jpg (${origW}×${origH}) -> Pictures/Camera/"
                         )
                         refreshGallery()
-                        showStatusBanner(
-                            "Saved $aiTag${state.photoResolution.shortLabel} ${state.photoFormat.badgeLabel} (${String.format("%.1fx", state.currentZoomRatio)})"
-                        )
+
+                        val upscaleMode = state.aiUpscaleMode
+                        if (upscaleMode != AiUpscaleMode.ORIGINAL) {
+                            _uiState.update {
+                                it.copy(
+                                    isUpscalingInProgress = true,
+                                    upscaleProgressPercent = 5
+                                )
+                            }
+                            showStatusBanner(
+                                "Saved Original (${origW}×${origH}). Running ${upscaleMode.uiLabel}..."
+                            )
+                            appendDiagnosticLog(
+                                "AI-SR",
+                                "Starting tiled ${upscaleMode.uiLabel} on background thread..."
+                            )
+
+                            val (upscaledUri, srResult) = galleryRepository.saveAiUpscaledSeparatePhoto(
+                                originalBitmap = savedCapture.originalBitmap,
+                                baseTimestamp = savedCapture.baseTimestamp,
+                                upscaleMode = upscaleMode,
+                                zoomRatio = state.currentZoomRatio,
+                                srEngine = srEngine,
+                                onProgress = { pct ->
+                                    _uiState.update { it.copy(upscaleProgressPercent = pct) }
+                                }
+                            )
+
+                            _uiState.update {
+                                it.copy(
+                                    isUpscalingInProgress = false,
+                                    upscaleProgressPercent = 0
+                                )
+                            }
+
+                            if (upscaledUri != null && srResult != null) {
+                                appendDiagnosticLog(
+                                    "AI-SR",
+                                    "SavedIMG_${savedCapture.baseTimestamp}${upscaleMode.fileSuffix}.jpg (${srResult.bitmap.width}×${srResult.bitmap.height}) via ${srResult.engineDescription} in ${srResult.elapsedMs}ms"
+                                )
+                                refreshGallery()
+                                showStatusBanner(
+                                    "Saved Original + IMG_${savedCapture.baseTimestamp}${upscaleMode.fileSuffix}.jpg (${srResult.bitmap.width}×${srResult.bitmap.height})"
+                                )
+                            } else {
+                                showStatusBanner("Original photo saved; AI upscale failed.")
+                            }
+                        } else {
+                            showStatusBanner(
+                                "Saved Original Photo (${origW}×${origH}) to Pictures/Camera/"
+                            )
+                        }
                     } else {
-                        appendDiagnosticLog("ERROR", "Failed saving 4K photo to MediaStore")
+                        appendDiagnosticLog("ERROR", "Failed saving photo to MediaStore")
                         showStatusBanner("Failed to save photo to MediaStore.")
                     }
                 }
@@ -761,7 +894,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // Hybrid AI Scene Coach (Firebase AI Logic - gemini-3.8-flash)
+    // Hybrid AI Scene Coach (Firebase AI Logic - gemini-2.5-flash)
     fun requestGeminiSceneCritique() {
         _uiState.update {
             it.copy(
@@ -769,7 +902,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 aiCoachState = AiCoachUiState.Analyzing
             )
         }
-        appendDiagnosticLog("AI-COACH", "Sending frame to Gemini 3.8 Flash Vision Coach...")
+        appendDiagnosticLog("AI-COACH", "Sending frame to Gemini Vision Coach...")
         viewModelScope.launch {
             val frame: Bitmap = hardwareController.grabViewfinderBitmap()
                 ?: BitmapFactory.decodeResource(
@@ -880,8 +1013,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         selectedMediaItem = items.firstOrNull()
                     )
                 }
-                appendDiagnosticLog("SAMPLE", "Imported 4K (3840×2160) Studio Sample Shot")
-                showStatusBanner("Imported 4K (3840×2160) Flagship Studio Sample Shot")
+                appendDiagnosticLog("SAMPLE", "Imported Studio Sample Shot to Pictures/Camera/")
+                showStatusBanner("Imported Studio Sample Shot")
             }
         }
     }
@@ -895,8 +1028,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 selectedMediaItem = item,
                 photoEditState = PhotoEditState(
-                    filter = it.activeLut,
-                    logProfile = it.activeLogProfile
+                    filter = if (it.creativeFiltersEnabled) it.activeLut else PhotoFilterPreset.ORIGINAL,
+                    logProfile = if (it.creativeFiltersEnabled) it.activeLogProfile else LogProfile.STANDARD_REC709
                 ),
                 activeScreen = ActiveAppScreen.PHOTO_EDITOR
             )
@@ -976,8 +1109,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             if (savedUri != null) {
-                appendDiagnosticLog("EDITOR", "Saved 4K LUT/Log edited photo -> $savedUri")
-                showStatusBanner("Saved 4K edited copy to Gallery")
+                appendDiagnosticLog("EDITOR", "Saved edited photo copy -> $savedUri")
+                showStatusBanner("Saved edited copy to Gallery (Original preserved)")
             } else {
                 showStatusBanner("Could not save edited photo.")
             }
@@ -1025,7 +1158,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(statusBannerMessage = message) }
         bannerDismissJob?.cancel()
         bannerDismissJob = viewModelScope.launch {
-            delay(2600L)
+            delay(2800L)
             _uiState.update { it.copy(statusBannerMessage = null) }
         }
     }
