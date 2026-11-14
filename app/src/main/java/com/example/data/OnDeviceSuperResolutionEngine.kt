@@ -3,18 +3,19 @@ package com.example.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
+import com.example.model.AiAutoEditRecipe
 import com.example.model.AiUpscaleMode
+import com.example.model.LogProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -23,11 +24,13 @@ import kotlin.math.sin
 private const val TAG = "OnDeviceSREngine"
 
 /**
- * On-Device Super-Resolution Engine (`Dispatchers.Default`).
+ * On-Device Super-Resolution & AI Auto-Edit Tile Engine (`Dispatchers.Default`).
  *
  * - Checks `assets/` for `realesrgan_x2.tflite` or `realesrgan_x4.tflite`.
  * - Falls back to a clearly labeled **Tiled Lanczos-3 + Mild Unsharp Mask** super-resolution
  *   pipeline when the `.tflite` model file is not bundled.
+ * - Optionally applies an `AiAutoEditRecipe` (exposure, dynamic range contrast, white balance warmth,
+ *   subtle LUT blend, and adaptive unsharp mask) per tile in a single memory-safe pass.
  * - Uses 512×512 source tiles with 16px border padding to prevent `OutOfMemoryError` (OOM)
  *   on large Honor 600 / flagship camera captures.
  */
@@ -54,11 +57,12 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
     suspend fun upscaleBitmapTiled(
         source: Bitmap,
         mode: AiUpscaleMode,
+        recipe: AiAutoEditRecipe? = null,
         onProgress: (Int) -> Unit
     ): UpscaleResult = withContext(Dispatchers.Default) {
         val startMs = System.currentTimeMillis()
         val scale = mode.scaleFactor
-        if (scale <= 1) {
+        if (scale <= 1 && recipe == null) {
             onProgress(100)
             return@withContext UpscaleResult(source, 1, "Original Native", 0L)
         }
@@ -70,8 +74,9 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
 
         // Guard maximum output dimension so a 4x upscale does not exceed Android Bitmap heap limits
         val maxOutputEdge = 7680 // 8K UHD ceiling for OOM safety
-        val rawOutW = srcW * scale
-        val rawOutH = srcH * scale
+        val effectiveScale = scale.coerceAtLeast(1)
+        val rawOutW = srcW * effectiveScale
+        val rawOutH = srcH * effectiveScale
         val safetyDownscale = if (max(rawOutW, rawOutH) > maxOutputEdge) {
             maxOutputEdge.toFloat() / max(rawOutW, rawOutH).toFloat()
         } else {
@@ -81,17 +86,37 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
         val outW = (rawOutW * safetyDownscale).roundToInt().coerceAtLeast(1)
         val outH = (rawOutH * safetyDownscale).roundToInt().coerceAtLeast(1)
 
-        val hasTflite = hasBundledTfliteModel(scale)
-        val engineLabel = if (hasTflite) {
-            "Real-ESRGAN TFLite ${scale}x"
+        val hasTflite = hasBundledTfliteModel(effectiveScale)
+        val baseEngineLabel = if (hasTflite) {
+            "Real-ESRGAN TFLite ${effectiveScale}x"
         } else {
-            "Tiled Lanczos-3 + Mild Unsharp ${scale}x (Fallback)"
+            "Tiled Lanczos-3 + Mild Unsharp ${effectiveScale}x"
+        }
+        val engineLabel = if (recipe != null) {
+            "$baseEngineLabel + ${recipe.styleTitle}"
+        } else {
+            "$baseEngineLabel (Fallback)"
         }
         Log.i(TAG, "Starting $engineLabel: ${srcW}x${srcH} -> ${outW}x${outH}")
 
         val outputBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val outputCanvas = Canvas(outputBitmap)
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            if (recipe != null) {
+                val cm = MediaGalleryRepository.buildCombinedColorMatrix(
+                    lut = recipe.recommendedLut,
+                    lutIntensity = recipe.lutIntensity,
+                    logProfile = LogProfile.STANDARD_REC709,
+                    extraContrast = recipe.contrast,
+                    extraSaturation = recipe.saturation,
+                    extraBrightness = recipe.brightness,
+                    extraWarmth = recipe.warmth
+                )
+                colorFilter = ColorMatrixColorFilter(cm)
+            }
+        }
+
+        val unsharpAmount = (recipe?.detailSharpness ?: 0.28f).coerceIn(0.15f, 0.40f)
 
         // Tile processing parameters (512x512 tiles with 16px overlap to avoid tile seams and OOM)
         val tileSize = 512
@@ -127,13 +152,22 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
                 val scaledPadH = (padH * effectiveScaleY).roundToInt().coerceAtLeast(1)
 
                 // Step 1: High-precision filtered interpolation per tile
-                val upscaledTile = Bitmap.createScaledBitmap(paddedTile, scaledPadW, scaledPadH, true)
+                val upscaledTile = if (scaledPadW == padW && scaledPadH == padH) {
+                    paddedTile
+                } else {
+                    Bitmap.createScaledBitmap(paddedTile, scaledPadW, scaledPadH, true)
+                }
 
-                // Step 2: Mild edge-preserving unsharp mask (amount = 0.28f, threshold = 6)
+                // Step 2: Mild edge-preserving unsharp mask (threshold = 6)
                 // Avoids halos, oversharpening, and watercolor artifacts on foliage
-                val sharpenedTile = applyMildUnsharpMask(upscaledTile, amount = 0.28f, threshold = 6)
+                val sharpenedTile = applyMildUnsharpMask(
+                    tile = upscaledTile,
+                    amount = unsharpAmount,
+                    threshold = 6
+                )
 
                 // Step 3: Copy only the non-overlapping interior region into the destination canvas
+                // (applying the AI Auto-Edit ColorMatrix filter on draw if recipe != null)
                 val cropX = ((srcLeft - padLeft) * effectiveScaleX).roundToInt().coerceAtLeast(0)
                 val cropY = ((srcTop - padTop) * effectiveScaleY).roundToInt().coerceAtLeast(0)
                 val dstLeft = (srcLeft * effectiveScaleX).roundToInt()
@@ -148,9 +182,9 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
                 val dstRect = Rect(dstLeft, dstTop, dstLeft + copyW, dstTop + copyH)
                 outputCanvas.drawBitmap(sharpenedTile, srcRect, dstRect, paint)
 
-                if (paddedTile !== source) paddedTile.recycle()
-                if (upscaledTile !== sharpenedTile) upscaledTile.recycle()
-                sharpenedTile.recycle()
+                if (paddedTile !== source && paddedTile !== upscaledTile) paddedTile.recycle()
+                if (upscaledTile !== source && upscaledTile !== sharpenedTile) upscaledTile.recycle()
+                if (sharpenedTile !== source) sharpenedTile.recycle()
 
                 completedTiles++
                 val pct = 10 + ((completedTiles * 85) / totalTiles)
@@ -158,11 +192,13 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
             }
         }
 
+        val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
         onProgress(100)
         UpscaleResult(
             bitmap = outputBitmap,
-            scaleFactor = scale,
-            engineLabel = engineLabel
+            scaleFactor = effectiveScale,
+            engineLabel = engineLabel,
+            elapsedMs = elapsed
         )
     }
 

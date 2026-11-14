@@ -30,8 +30,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.CropRotate
 import androidx.compose.material.icons.filled.Delete
@@ -45,16 +47,20 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,12 +83,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.model.CropAspectPreset
+import com.example.model.HonorAiGenPreset
+import com.example.model.HonorAiGenUiState
 import com.example.model.LogProfile
 import com.example.model.LutCategory
 import com.example.model.MediaItem
 import com.example.model.PhotoEditState
 import com.example.model.PhotoFilterPreset
 import com.example.ui.theme.AiCyan
+import com.example.ui.theme.AiViolet
 import com.example.ui.theme.AmoledBlack
 import com.example.ui.theme.DividerSubtle
 import com.example.ui.theme.EmeraldOptimal
@@ -102,6 +111,10 @@ fun GalleryScreen(
     state: CameraUiState,
     onSelectMedia: (MediaItem) -> Unit,
     onOpenEditor: (MediaItem) -> Unit,
+    onTriggerAiAutoEditAndUpscale: (MediaItem) -> Unit,
+    onSelectHonorAiPreset: (HonorAiGenPreset) -> Unit = {},
+    onUpdateCustomHonorAiPrompt: (String) -> Unit = {},
+    onDismissHonorAiSheet: () -> Unit = {},
     onShareSelected: () -> Unit,
     onDeleteSelected: () -> Unit,
     onImportSamplePhoto: () -> Unit,
@@ -126,7 +139,12 @@ fun GalleryScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp)
+            ) {
                 IconButton(
                     onClick = onBackToCamera,
                     modifier = Modifier.testTag("gallery_back_button")
@@ -137,16 +155,20 @@ fun GalleryScreen(
                         tint = TextPrimaryWhite
                     )
                 }
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.gallery_title),
                         style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimaryWhite
+                        color = TextPrimaryWhite,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "${state.mediaList.size} items in Pictures/Camera (MediaStore)",
+                        text = "${state.mediaList.size} items • Pictures/Camera",
                         style = MaterialTheme.typography.labelSmall,
-                        color = GalaxyAmber
+                        color = GalaxyAmber,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -165,7 +187,9 @@ fun GalleryScreen(
                 Text(
                     text = "Sample Shot",
                     style = MaterialTheme.typography.labelMedium,
-                    color = GalaxyAmber
+                    color = GalaxyAmber,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -262,8 +286,8 @@ fun GalleryScreen(
                     )
                 }
 
-                // File Info + ORIGINAL vs AI UPSCALE 2x / 4x Variant Badge
-                val isAiUpscaled = selected.variantBadge.startsWith("AI UPSCALE")
+                // File Info + ORIGINAL vs HONOR AI GEN / AI EDIT / AI UPSCALE 2x / 4x Variant Badge
+                val isAiUpscaled = selected.variantBadge.startsWith("AI") || selected.variantBadge.startsWith("HONOR AI")
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -318,7 +342,7 @@ fun GalleryScreen(
             ) {
                 items(state.mediaList, key = { "${it.isVideo}_${it.id}" }) { item ->
                     val isCurrent = item.id == selected.id && item.isVideo == selected.isVideo
-                    val isItemAi = item.variantBadge.startsWith("AI UPSCALE")
+                    val isItemAi = item.variantBadge.startsWith("AI") || item.variantBadge.startsWith("HONOR AI")
                     Box(
                         modifier = Modifier
                             .size(72.dp)
@@ -373,21 +397,56 @@ fun GalleryScreen(
                 }
             }
 
+            if (state.isUpscalingInProgress) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(ObsidianElevated)
+                        .border(1.dp, EmeraldOptimal, RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = EmeraldOptimal,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "${state.upscaleStatusStage.ifBlank { "AI Auto-Edit & Upscaling..." }} (${state.upscaleProgressPercent}%)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = EmeraldOptimal,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(ObsidianSurface)
-                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (!selected.isVideo) {
                     GalleryActionButton(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "Honor AI Gen",
+                        accent = EmeraldOptimal,
+                        onClick = { onTriggerAiAutoEditAndUpscale(selected) },
+                        testTag = "gallery_ai_auto_edit_button",
+                        modifier = Modifier.weight(1f)
+                    )
+                    GalleryActionButton(
                         icon = Icons.Default.Edit,
                         label = "Edit & LUTs",
                         accent = GalaxyAmber,
                         onClick = { onOpenEditor(selected) },
-                        testTag = "gallery_edit_button"
+                        testTag = "gallery_edit_button",
+                        modifier = Modifier.weight(1f)
                     )
                 }
                 GalleryActionButton(
@@ -395,16 +454,262 @@ fun GalleryScreen(
                     label = "Share",
                     accent = AiCyan,
                     onClick = onShareSelected,
-                    testTag = "gallery_share_button"
+                    testTag = "gallery_share_button",
+                    modifier = Modifier.weight(1f)
                 )
                 GalleryActionButton(
                     icon = Icons.Default.Delete,
                     label = "Delete",
                     accent = RecordCrimson,
                     onClick = onDeleteSelected,
-                    testTag = "gallery_delete_button"
+                    testTag = "gallery_delete_button",
+                    modifier = Modifier.weight(1f)
                 )
             }
+        }
+    }
+
+    if (state.showHonorAiGenSheet && selected != null && !selected.isVideo) {
+        HonorAiGenerationBottomSheet(
+            state = state,
+            selectedMedia = selected,
+            onSelectPreset = onSelectHonorAiPreset,
+            onUpdateCustomPrompt = onUpdateCustomHonorAiPrompt,
+            onGenerate = { onTriggerAiAutoEditAndUpscale(selected) },
+            onDismiss = onDismissHonorAiSheet
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HonorAiGenerationBottomSheet(
+    state: CameraUiState,
+    selectedMedia: MediaItem,
+    onSelectPreset: (HonorAiGenPreset) -> Unit,
+    onUpdateCustomPrompt: (String) -> Unit,
+    onGenerate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = ObsidianSurface,
+        contentColor = TextPrimaryWhite
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "HONOR 600 AI PHOTO GENERATION",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = EmeraldOptimal,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "AIGC Detail Reconstruction & Studio Mastering (gemini-nano-banana-2.1)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondaryZinc
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close Honor AI Sheet",
+                        tint = TextPrimaryWhite
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Preset Selection Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                HonorAiGenPreset.entries.forEach { preset ->
+                    val isSelected = state.selectedHonorAiPreset == preset
+                    Column(
+                        modifier = Modifier
+                            .width(175.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isSelected) EmeraldOptimal.copy(alpha = 0.18f) else ObsidianElevated)
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) EmeraldOptimal else DividerSubtle,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onSelectPreset(preset) }
+                            .padding(10.dp)
+                            .testTag("honor_ai_preset_${preset.name.lowercase()}")
+                    ) {
+                        Text(
+                            text = preset.badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isSelected) EmeraldOptimal else GalaxyAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = preset.title,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = TextPrimaryWhite,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = preset.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondaryZinc,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedTextField(
+                value = state.customHonorAiPrompt,
+                onValueChange = onUpdateCustomPrompt,
+                label = { Text("Optional Custom AI Instruction (e.g. realistic brick & foliage detail)", color = TextSecondaryZinc) },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("honor_ai_custom_prompt_input")
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Render HonorAiGenUiState (Loading / Success / Error / Idle)
+            when (val aiState = state.honorAiGenUiState) {
+                is HonorAiGenUiState.Loading -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(ObsidianElevated)
+                            .border(1.dp, EmeraldOptimal, RoundedCornerShape(16.dp))
+                            .padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(color = EmeraldOptimal)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = aiState.stageMessage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = EmeraldOptimal,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Reconstructing photorealistic details (${state.upscaleProgressPercent}%)...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondaryZinc
+                        )
+                    }
+                }
+                is HonorAiGenUiState.Success -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(ObsidianElevated)
+                            .border(1.dp, EmeraldOptimal, RoundedCornerShape(16.dp))
+                            .padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "GENERATED: ${aiState.presetTitle} (${aiState.bitmap.width}×${aiState.bitmap.height})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = EmeraldOptimal,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Image(
+                            bitmap = aiState.bitmap.asImageBitmap(),
+                            contentDescription = "Honor 600 AI Generated Result",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(210.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+                    }
+                }
+                is HonorAiGenUiState.Error -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RecordCrimson.copy(alpha = 0.14f))
+                            .border(1.dp, RecordCrimson, RoundedCornerShape(16.dp))
+                            .padding(14.dp)
+                    ) {
+                        Text(
+                            text = "Honor 600 AI Generation Notice",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = RecordCrimson,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = aiState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextPrimaryWhite
+                        )
+                    }
+                }
+                is HonorAiGenUiState.Idle -> {
+                    Text(
+                        text = "Source: ${selectedMedia.displayName} (${selectedMedia.formattedResolution}) • Original file is always preserved.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondaryZinc
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Button(
+                onClick = onGenerate,
+                enabled = state.honorAiGenUiState !is HonorAiGenUiState.Loading,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = EmeraldOptimal,
+                    contentColor = AmoledBlack
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("run_honor_ai_gen_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Generate with ${state.selectedHonorAiPreset.title}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
@@ -415,28 +720,32 @@ private fun GalleryActionButton(
     label: String,
     accent: androidx.compose.ui.graphics.Color,
     onClick: () -> Unit,
-    testTag: String
+    testTag: String,
+    modifier: Modifier = Modifier
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .minimumInteractiveComponentSize()
-            .padding(horizontal = 18.dp, vertical = 6.dp)
+            .padding(horizontal = 4.dp, vertical = 6.dp)
             .testTag(testTag)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = label,
             tint = accent,
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(22.dp)
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
-            color = TextPrimaryWhite
+            color = TextPrimaryWhite,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            softWrap = false
         )
     }
 }
@@ -525,8 +834,36 @@ fun PhotoEditorScreen(
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                OutlinedButton(
+                    onClick = { viewModel.applyAiAutoEditInEditor() },
+                    enabled = !state.isApplyingEditorAi,
+                    modifier = Modifier.testTag("editor_ai_magic_button")
+                ) {
+                    if (state.isApplyingEditorAi) {
+                        CircularProgressIndicator(
+                            color = AiCyan,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "AI Auto-Edit",
+                            tint = AiCyan,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "AI Auto",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AiCyan,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
                 IconButton(
                     onClick = { viewModel.resetPhotoEdits() },
                     modifier = Modifier.testTag("editor_reset_button")
@@ -563,6 +900,33 @@ fun PhotoEditorScreen(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Save Copy", fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+
+        state.lastAiAutoEditRecipe?.let { recipe ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(ObsidianElevated)
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${recipe.styleTitle}: ${recipe.summary}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = EmeraldOptimal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (recipe.usedCloudGemini) "GEMINI AI" else "ON-DEVICE AI",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AiCyan,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
 

@@ -377,6 +377,69 @@ fun CameraViewfinderScreen(
                     )
                 }
 
+                // Automatic Post-Capture Honor 600 AI Generation & Upscale Toggle Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(
+                            if (state.aiAutoEditAfterCaptureEnabled) AiCyan.copy(alpha = 0.22f) else ObsidianGlass
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else DividerSubtle,
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                        .clickable { viewModel.toggleAiAutoEditAfterCapture() }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("toggle_ai_auto_edit_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = "Honor 600 AI Generation After Capture",
+                        tint = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else TextSecondaryZinc,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (state.aiAutoEditAfterCaptureEnabled) {
+                            "Honor AI Gen: ${state.selectedHonorAiPreset.badge}"
+                        } else {
+                            "Honor AI Gen: OFF"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else TextPrimaryWhite,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Honor 600 AIGC Style Cycler Pill (AIGC DETAIL / HARCOURT / AI HDR / AI NIGHT)
+                if (state.aiAutoEditAfterCaptureEnabled) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(ObsidianGlass)
+                            .border(1.dp, EmeraldOptimal.copy(alpha = 0.75f), RoundedCornerShape(20.dp))
+                            .clickable {
+                                val presets = com.example.model.HonorAiGenPreset.entries
+                                val nextIdx = (presets.indexOf(state.selectedHonorAiPreset) + 1) % presets.size
+                                viewModel.selectHonorAiPreset(presets[nextIdx])
+                            }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("cycle_honor_ai_preset_button")
+                    ) {
+                        Text(
+                            text = state.selectedHonorAiPreset.title,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = EmeraldOptimal,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
                 // Step 5: Optional AI Upscale Mode Toggle Pill ("Original" / "AI Upscale 2x" / "AI Upscale 4x")
                 val isUpscaleActive = state.aiUpscaleMode != AiUpscaleMode.ORIGINAL
                 Row(
@@ -598,8 +661,11 @@ fun CameraViewfinderScreen(
                         strokeWidth = 2.dp,
                         modifier = Modifier.size(16.dp)
                     )
+                    val stageText = state.upscaleStatusStage.ifBlank {
+                        "Running ${state.aiUpscaleMode.uiLabel}..."
+                    }
                     Text(
-                        text = "Running ${state.aiUpscaleMode.uiLabel} (${state.upscaleProgressPercent}%)...",
+                        text = "$stageText (${state.upscaleProgressPercent}%)",
                         style = MaterialTheme.typography.labelMedium,
                         color = EmeraldOptimal,
                         fontWeight = FontWeight.Bold
@@ -782,6 +848,7 @@ fun CameraViewfinderScreen(
         if (state.showSettingsDialog) {
             CameraSettingsDialog(
                 state = state,
+                onToggleAiAutoEditAfterCapture = viewModel::toggleAiAutoEditAfterCapture,
                 onCycleAiUpscaleMode = viewModel::cycleAiUpscaleMode,
                 onToggleCreativeFilters = viewModel::toggleCreativeFilters,
                 onTogglePhotoResolution = viewModel::togglePhotoResolution,

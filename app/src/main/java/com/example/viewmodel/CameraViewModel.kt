@@ -16,6 +16,7 @@ import com.example.data.CameraHardwareController
 import com.example.data.MediaGalleryRepository
 import com.example.data.OnDeviceSuperResolutionEngine
 import com.example.data.VideoRecordStatus
+import com.example.model.AiAutoEditRecipe
 import com.example.model.AiCoachUiState
 import com.example.model.AiUpscaleMode
 import com.example.model.AspectRatioSetting
@@ -25,6 +26,8 @@ import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
 import com.example.model.GeminiSceneCritique
 import com.example.model.HardwareCapabilities
+import com.example.model.HonorAiGenPreset
+import com.example.model.HonorAiGenUiState
 import com.example.model.LogProfile
 import com.example.model.LutCategory
 import com.example.model.MediaItem
@@ -41,6 +44,7 @@ import com.example.model.VideoFpsSetting
 import com.example.model.VideoResolutionSetting
 import com.example.model.WhiteBalancePreset
 import com.example.model.ZoomOptimizationProfile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,8 +105,17 @@ data class CameraUiState(
     val aiSceneOptimizerEnabled: Boolean = false,
     // Step 5: Optional On-Device AI Upscale mode (Original / AI Upscale 2x / AI Upscale 4x)
     val aiUpscaleMode: AiUpscaleMode = AiUpscaleMode.ORIGINAL,
+    // Automatic Post-Capture Honor 600 AI Generation & Upscale
+    val aiAutoEditAfterCaptureEnabled: Boolean = true,
+    val selectedHonorAiPreset: HonorAiGenPreset = HonorAiGenPreset.AIGC_SUPER_RES,
+    val honorAiGenUiState: HonorAiGenUiState = HonorAiGenUiState.Idle,
+    val showHonorAiGenSheet: Boolean = false,
+    val customHonorAiPrompt: String = "",
     val isUpscalingInProgress: Boolean = false,
     val upscaleProgressPercent: Int = 0,
+    val upscaleStatusStage: String = "",
+    val lastAiAutoEditRecipe: AiAutoEditRecipe? = null,
+    val isApplyingEditorAi: Boolean = false,
     val aiZoomAutoEnhanceEnabled: Boolean = false,
     val currentZoomRatio: Float = 1.0f,
     val extraHybridZoomFactor: Float = 1.0f,
@@ -373,6 +386,42 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleAiZoomAutoEnhance() {
         cycleAiUpscaleMode()
+    }
+
+    fun toggleAiAutoEditAfterCapture() {
+        val next = !_uiState.value.aiAutoEditAfterCaptureEnabled
+        _uiState.update { it.copy(aiAutoEditAfterCaptureEnabled = next) }
+        appendDiagnosticLog(
+            "HONOR-AI",
+            "Automatic Post-Capture Honor 600 AI Generation -> ${if (next) "ENABLED (${_uiState.value.selectedHonorAiPreset.title})" else "OFF"}"
+        )
+        showStatusBanner(
+            if (next) "Honor 600 AI Gen ON (${_uiState.value.selectedHonorAiPreset.title})"
+            else "Honor 600 AI Gen OFF (Saves Original Only)"
+        )
+    }
+
+    fun selectHonorAiPreset(preset: HonorAiGenPreset) {
+        _uiState.update {
+            it.copy(
+                selectedHonorAiPreset = preset,
+                aiAutoEditAfterCaptureEnabled = true
+            )
+        }
+        appendDiagnosticLog("HONOR-AI", "Selected Honor 600 AI Preset -> ${preset.title}")
+        showStatusBanner("Honor 600 AI: ${preset.title}")
+    }
+
+    fun updateCustomHonorAiPrompt(prompt: String) {
+        _uiState.update { it.copy(customHonorAiPrompt = prompt) }
+    }
+
+    fun openHonorAiGenSheet() {
+        _uiState.update { it.copy(showHonorAiGenSheet = true) }
+    }
+
+    fun dismissHonorAiGenSheet() {
+        _uiState.update { it.copy(showHonorAiGenSheet = false) }
     }
 
     // Video Bitrate up to 1000 Mbps
@@ -767,11 +816,138 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         refreshGallery()
 
                         val upscaleMode = state.aiUpscaleMode
-                        if (upscaleMode != AiUpscaleMode.ORIGINAL) {
+                        if (state.aiAutoEditAfterCaptureEnabled) {
+                            val targetFactor = if (upscaleMode == AiUpscaleMode.UPSCALE_4X) 4 else 2
+                            val activePreset = state.selectedHonorAiPreset
                             _uiState.update {
                                 it.copy(
                                     isUpscalingInProgress = true,
-                                    upscaleProgressPercent = 5
+                                    upscaleProgressPercent = 8,
+                                    upscaleStatusStage = "Honor 600 AI Generating (${activePreset.badge})...",
+                                    honorAiGenUiState = HonorAiGenUiState.Loading(
+                                        "Synthesizing ${activePreset.title} with Gemini AI (30–60s)..."
+                                    )
+                                )
+                            }
+                            showStatusBanner(
+                                "Saved Original (${origW}×${origH}). Running ${activePreset.title}..."
+                            )
+                            appendDiagnosticLog(
+                                "HONOR-AI",
+                                "Starting ${activePreset.title} (gemini-nano-banana-2.1) + ${targetFactor}x Super-Res..."
+                            )
+
+                            // Step A: Try Honor 600 Generative AI Image Reconstruction (`gemini-nano-banana-2.1`)
+                            var generatedSuccess = false
+                            try {
+                                val generatedBitmap = aiRepository.generateHonorAiReconstructedImage(
+                                    sourceBitmap = savedCapture.originalBitmap,
+                                    preset = activePreset,
+                                    customInstruction = state.customHonorAiPrompt
+                                )
+                                _uiState.update {
+                                    it.copy(
+                                        upscaleProgressPercent = 65,
+                                        upscaleStatusStage = "${activePreset.title} • Super-Res Upscaling..."
+                                    )
+                                }
+                                val (genUri, finalGenBitmap) = galleryRepository.saveHonorAiGeneratedPhoto(
+                                    generatedBitmap = generatedBitmap,
+                                    baseTimestamp = savedCapture.baseTimestamp,
+                                    presetBadge = activePreset.badge,
+                                    upscaleMode = if (targetFactor == 4) AiUpscaleMode.UPSCALE_4X else AiUpscaleMode.UPSCALE_2X,
+                                    zoomRatio = state.currentZoomRatio,
+                                    srEngine = srEngine,
+                                    onProgress = { pct ->
+                                        _uiState.update {
+                                            it.copy(upscaleProgressPercent = (65 + (pct * 0.35f).toInt()).coerceIn(65, 100))
+                                        }
+                                    }
+                                )
+                                if (genUri != null) {
+                                    generatedSuccess = true
+                                    val updatedItems = galleryRepository.loadCapturedMedia()
+                                    _uiState.update {
+                                        it.copy(
+                                            isUpscalingInProgress = false,
+                                            upscaleProgressPercent = 0,
+                                            upscaleStatusStage = "",
+                                            mediaList = updatedItems,
+                                            selectedMediaItem = updatedItems.firstOrNull(),
+                                            honorAiGenUiState = HonorAiGenUiState.Success(
+                                                bitmap = finalGenBitmap,
+                                                savedUri = genUri,
+                                                presetTitle = activePreset.title
+                                            )
+                                        )
+                                    }
+                                    appendDiagnosticLog(
+                                        "HONOR-AI",
+                                        "Saved Honor 600 AI Generated photo (${finalGenBitmap.width}×${finalGenBitmap.height}) -> $genUri"
+                                    )
+                                    showStatusBanner(
+                                        "Saved Original + ${activePreset.title} (${finalGenBitmap.width}×${finalGenBitmap.height})"
+                                    )
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                val errMsg = e.localizedMessage ?: "Honor 600 AI Generation failed."
+                                appendDiagnosticLog("HONOR-AI-ERR", errMsg)
+                                _uiState.update {
+                                    it.copy(honorAiGenUiState = HonorAiGenUiState.Error(errMsg))
+                                }
+                            }
+
+                            // Step B: If cloud generative image synthesis failed (e.g. offline or quota),
+                            // still run the AI Color Mastering + 2x/4x Tiled Super-Resolution pass
+                            if (!generatedSuccess) {
+                                val recipe = aiRepository.generateAiAutoEditRecipe(
+                                    capturedBitmap = savedCapture.originalBitmap,
+                                    upscaleFactor = targetFactor
+                                )
+                                _uiState.update {
+                                    it.copy(
+                                        lastAiAutoEditRecipe = recipe,
+                                        upscaleProgressPercent = 20,
+                                        upscaleStatusStage = "${recipe.styleTitle} • Upscaling ${targetFactor}x..."
+                                    )
+                                }
+                                val (editedUri, srResult) = galleryRepository.saveAiAutoEditedAndUpscaledPhoto(
+                                    originalBitmap = savedCapture.originalBitmap,
+                                    baseTimestamp = savedCapture.baseTimestamp,
+                                    recipe = recipe,
+                                    upscaleMode = if (targetFactor == 4) AiUpscaleMode.UPSCALE_4X else AiUpscaleMode.UPSCALE_2X,
+                                    zoomRatio = state.currentZoomRatio,
+                                    srEngine = srEngine,
+                                    onProgress = { pct ->
+                                        _uiState.update {
+                                            it.copy(upscaleProgressPercent = (20 + (pct * 0.80f).toInt()).coerceIn(20, 100))
+                                        }
+                                    }
+                                )
+
+                                _uiState.update {
+                                    it.copy(
+                                        isUpscalingInProgress = false,
+                                        upscaleProgressPercent = 0,
+                                        upscaleStatusStage = ""
+                                    )
+                                }
+
+                                if (editedUri != null && srResult != null) {
+                                    refreshGallery()
+                                    showStatusBanner(
+                                        "Saved Original + ${recipe.styleTitle} (${srResult.bitmap.width}×${srResult.bitmap.height})"
+                                    )
+                                }
+                            }
+                        } else if (upscaleMode != AiUpscaleMode.ORIGINAL) {
+                            _uiState.update {
+                                it.copy(
+                                    isUpscalingInProgress = true,
+                                    upscaleProgressPercent = 5,
+                                    upscaleStatusStage = "Running ${upscaleMode.uiLabel}..."
                                 )
                             }
                             showStatusBanner(
@@ -796,14 +972,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                             _uiState.update {
                                 it.copy(
                                     isUpscalingInProgress = false,
-                                    upscaleProgressPercent = 0
+                                    upscaleProgressPercent = 0,
+                                    upscaleStatusStage = ""
                                 )
                             }
 
                             if (upscaledUri != null && srResult != null) {
                                 appendDiagnosticLog(
                                     "AI-SR",
-                                    "SavedIMG_${savedCapture.baseTimestamp}${upscaleMode.fileSuffix}.jpg (${srResult.bitmap.width}×${srResult.bitmap.height}) via ${srResult.engineDescription} in ${srResult.elapsedMs}ms"
+                                    "Saved IMG_${savedCapture.baseTimestamp}${upscaleMode.fileSuffix}.jpg (${srResult.bitmap.width}×${srResult.bitmap.height}) via ${srResult.engineDescription} in ${srResult.elapsedMs}ms"
                                 )
                                 refreshGallery()
                                 showStatusBanner(
@@ -1152,6 +1329,151 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun renderPreviewWithEdits(source: Bitmap, editState: PhotoEditState): Bitmap {
         return galleryRepository.renderPhotoEdits(source, editState)
+    }
+
+    /**
+     * Runs Honor 600 AI Image Generation (`gemini-nano-banana-2.1`) on the selected photo in the Gallery
+     * and saves the synthesized & 2x super-resolution image as a separate `_HONOR_AI_*.jpg` file.
+     * Surfaces any errors transparently to `HonorAiGenUiState.Error`.
+     */
+    fun triggerAiAutoEditAndUpscaleFromGallery(item: MediaItem) {
+        if (item.isVideo) return
+        val preset = _uiState.value.selectedHonorAiPreset
+        val customPrompt = _uiState.value.customHonorAiPrompt
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    showHonorAiGenSheet = true,
+                    isUpscalingInProgress = true,
+                    upscaleProgressPercent = 10,
+                    upscaleStatusStage = "Honor 600 AI Generating (${preset.title})...",
+                    honorAiGenUiState = HonorAiGenUiState.Loading(
+                        "Synthesizing ${preset.title} with Gemini AI (may take 30–60s)..."
+                    )
+                )
+            }
+            val sourceBmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                galleryRepository.decodeBitmapFromUri(item.uri, maxDimension = 2048)
+            }
+            if (sourceBmp == null) {
+                _uiState.update {
+                    it.copy(
+                        isUpscalingInProgress = false,
+                        upscaleProgressPercent = 0,
+                        upscaleStatusStage = "",
+                        honorAiGenUiState = HonorAiGenUiState.Error("Could not decode source image from MediaStore.")
+                    )
+                }
+                return@launch
+            }
+
+            try {
+                val generatedBitmap = aiRepository.generateHonorAiReconstructedImage(
+                    sourceBitmap = sourceBmp,
+                    preset = preset,
+                    customInstruction = customPrompt
+                )
+                _uiState.update {
+                    it.copy(
+                        upscaleProgressPercent = 70,
+                        upscaleStatusStage = "${preset.title} • 2x Super-Res Upscaling...",
+                        honorAiGenUiState = HonorAiGenUiState.Loading("Applying 2x Super-Resolution & saving to Gallery...")
+                    )
+                }
+
+                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val (savedUri, finalBitmap) = galleryRepository.saveHonorAiGeneratedPhoto(
+                    generatedBitmap = generatedBitmap,
+                    baseTimestamp = timestamp,
+                    presetBadge = preset.badge,
+                    upscaleMode = AiUpscaleMode.UPSCALE_2X,
+                    zoomRatio = 1.0f,
+                    srEngine = srEngine,
+                    onProgress = { pct ->
+                        _uiState.update {
+                            it.copy(upscaleProgressPercent = (70 + (pct * 0.30f).toInt()).coerceIn(70, 100))
+                        }
+                    }
+                )
+
+                val updatedList = galleryRepository.loadCapturedMedia()
+                _uiState.update {
+                    it.copy(
+                        isUpscalingInProgress = false,
+                        upscaleProgressPercent = 0,
+                        upscaleStatusStage = "",
+                        mediaList = updatedList,
+                        selectedMediaItem = updatedList.firstOrNull() ?: item,
+                        honorAiGenUiState = HonorAiGenUiState.Success(
+                            bitmap = finalBitmap,
+                            savedUri = savedUri,
+                            presetTitle = preset.title
+                        )
+                    )
+                }
+                appendDiagnosticLog(
+                    "HONOR-AI",
+                    "Generated & saved Honor 600 AI photo (${finalBitmap.width}×${finalBitmap.height}): ${preset.title}"
+                )
+                showStatusBanner("Saved ${preset.title} (${finalBitmap.width}×${finalBitmap.height})")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "Honor 600 AI image generation failed."
+                appendDiagnosticLog("HONOR-AI-ERR", msg)
+                _uiState.update {
+                    it.copy(
+                        isUpscalingInProgress = false,
+                        upscaleProgressPercent = 0,
+                        upscaleStatusStage = "",
+                        honorAiGenUiState = HonorAiGenUiState.Error(msg)
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Analyzes the currently open photo in the Photo Studio Editor using AI (Gemini Vision +
+     * On-Device Histogram fallback) and automatically tunes the editor's sliders & LUT.
+     */
+    fun applyAiAutoEditInEditor() {
+        val target = _uiState.value.selectedMediaItem ?: return
+        if (target.isVideo || _uiState.value.isApplyingEditorAi) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isApplyingEditorAi = true) }
+            val bmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                galleryRepository.decodeBitmapFromUri(target.uri, maxDimension = 1024)
+            }
+            if (bmp == null) {
+                _uiState.update { it.copy(isApplyingEditorAi = false) }
+                showStatusBanner("Unable to analyze photo for AI Auto-Edit.")
+                return@launch
+            }
+
+            val recipe = aiRepository.generateAiAutoEditRecipe(bmp, upscaleFactor = 2)
+            _uiState.update { current ->
+                current.copy(
+                    isApplyingEditorAi = false,
+                    lastAiAutoEditRecipe = recipe,
+                    photoEditState = current.photoEditState.copy(
+                        filter = recipe.recommendedLut,
+                        brightness = recipe.brightness,
+                        contrast = recipe.contrast,
+                        saturation = recipe.saturation,
+                        warmth = recipe.warmth,
+                        vignette = recipe.vignette
+                    )
+                )
+            }
+            appendDiagnosticLog(
+                "AI-EDITOR",
+                "Applied ${recipe.styleTitle}: ${recipe.summary}"
+            )
+            showStatusBanner("${recipe.styleTitle}: ${recipe.summary}")
+        }
     }
 
     fun showStatusBanner(message: String) {

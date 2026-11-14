@@ -293,6 +293,7 @@ class MediaGalleryRepository(private val context: Context) {
             val srResult = srEngine.upscaleBitmapTiled(
                 source = originalBitmap,
                 mode = upscaleMode,
+                recipe = null,
                 onProgress = onProgress
             )
             val separateFileName = "IMG_${baseTimestamp}${upscaleMode.fileSuffix}.jpg"
@@ -309,6 +310,105 @@ class MediaGalleryRepository(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to generate or save AI upscaled photo", e)
             null to null
+        }
+    }
+
+    /**
+     * Runs automatic post-capture AI Auto-Edit (Gemini 3.8 Flash / On-Device Histogram Mastering)
+     * combined with tiled AI Super-Resolution (2x or 4x) on `Dispatchers.Default`, and saves
+     * the result as a SEPARATE file (`IMG_xxx_AI_EDIT_2x.jpg` or `IMG_xxx_AI_EDIT_4x.jpg`)
+     * in `Pictures/Camera/`, never overwriting the original photo.
+     */
+    suspend fun saveAiAutoEditedAndUpscaledPhoto(
+        originalBitmap: Bitmap,
+        baseTimestamp: String,
+        upscaleMode: AiUpscaleMode,
+        recipe: com.example.model.AiAutoEditRecipe,
+        zoomRatio: Float,
+        srEngine: OnDeviceSuperResolutionEngine,
+        onProgress: (Int) -> Unit
+    ): Pair<Uri?, OnDeviceSuperResolutionEngine.UpscaleResult?> = withContext(Dispatchers.Default) {
+        try {
+            // Default to 2x super-resolution when AI Auto-Edit + Upscale is triggered and mode was ORIGINAL
+            val effectiveUpscaleMode = if (upscaleMode == AiUpscaleMode.ORIGINAL) {
+                AiUpscaleMode.UPSCALE_2X
+            } else {
+                upscaleMode
+            }
+            val srResult = srEngine.upscaleBitmapTiled(
+                source = originalBitmap,
+                mode = effectiveUpscaleMode,
+                recipe = recipe,
+                onProgress = onProgress
+            )
+            if (recipe.vignette > 0.015f) {
+                val canvas = Canvas(srResult.bitmap)
+                drawVignetteOverlay(
+                    canvas = canvas,
+                    width = srResult.bitmap.width.toFloat(),
+                    height = srResult.bitmap.height.toFloat(),
+                    strength = recipe.vignette
+                )
+            }
+            val scaleTag = "${effectiveUpscaleMode.scaleFactor}x"
+            val separateFileName = "IMG_${baseTimestamp}_AI_EDIT_${scaleTag}.jpg"
+            val savedUri = withContext(Dispatchers.IO) {
+                saveBitmapToMediaStore(
+                    bitmap = srResult.bitmap,
+                    exactFileName = separateFileName,
+                    jpegQuality = 98,
+                    photoFormat = PhotoFormatSetting.JPEG,
+                    zoomRatio = zoomRatio
+                )
+            }
+            savedUri to srResult
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to generate or save AI Auto-Edited & Upscaled photo", e)
+            null to null
+        }
+    }
+
+    /**
+     * Saves an Honor 600 AI-Generated (`gemini-nano-banana-2.1`) bitmap to `Pictures/Camera/`
+     * as a separate file (`IMG_<timestamp>_HONOR_AI_2x.jpg`), optionally running a 2x super-resolution
+     * pass so the output matches high-resolution gallery standards without ever overwriting the original.
+     */
+    suspend fun saveHonorAiGeneratedPhoto(
+        generatedBitmap: Bitmap,
+        baseTimestamp: String,
+        presetBadge: String,
+        upscaleMode: AiUpscaleMode,
+        zoomRatio: Float,
+        srEngine: OnDeviceSuperResolutionEngine,
+        onProgress: (Int) -> Unit = {}
+    ): Pair<Uri?, Bitmap> = withContext(Dispatchers.Default) {
+        try {
+            val effectiveMode = if (upscaleMode == AiUpscaleMode.UPSCALE_4X) {
+                AiUpscaleMode.UPSCALE_2X // Generated image is already 1024px+; 2x produces crisp 2048px+ UHD
+            } else {
+                AiUpscaleMode.UPSCALE_2X
+            }
+            val srResult = srEngine.upscaleBitmapTiled(
+                source = generatedBitmap,
+                mode = effectiveMode,
+                recipe = null,
+                onProgress = onProgress
+            )
+            val safeTag = presetBadge.replace(" ", "_").uppercase(Locale.US)
+            val separateFileName = "IMG_${baseTimestamp}_HONOR_AI_${safeTag}.jpg"
+            val savedUri = withContext(Dispatchers.IO) {
+                saveBitmapToMediaStore(
+                    bitmap = srResult.bitmap,
+                    exactFileName = separateFileName,
+                    jpegQuality = 99,
+                    photoFormat = PhotoFormatSetting.JPEG,
+                    zoomRatio = zoomRatio
+                )
+            }
+            savedUri to srResult.bitmap
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save Honor 600 AI generated photo", e)
+            null to generatedBitmap
         }
     }
 

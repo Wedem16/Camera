@@ -954,6 +954,7 @@ private fun RecommendedPill(label: String, value: String) {
 @Composable
 fun CameraSettingsDialog(
     state: CameraUiState,
+    onToggleAiAutoEditAfterCapture: () -> Unit,
     onCycleAiUpscaleMode: () -> Unit,
     onToggleCreativeFilters: () -> Unit,
     onTogglePhotoResolution: () -> Unit,
@@ -1041,6 +1042,14 @@ fun CameraSettingsDialog(
             }
 
             Spacer(modifier = Modifier.height(14.dp))
+
+            SettingToggleRow(
+                title = "AI Auto-Edit & Upscale After Capture",
+                subtitle = "Saves unchanged Original JPEG + automatic AI-mastered & upscaled copy (_AI_EDIT_2x.jpg)",
+                checked = state.aiAutoEditAfterCaptureEnabled,
+                onCheckedChange = { onToggleAiAutoEditAfterCapture() },
+                testTag = "setting_ai_auto_edit"
+            )
 
             SettingActionRow(
                 title = "On-Device AI Upscale Mode",

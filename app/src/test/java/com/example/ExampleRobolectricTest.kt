@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.AiSceneOptimizerRepository
 import com.example.data.OnDeviceSuperResolutionEngine
 import com.example.model.AiUpscaleMode
 import com.example.model.CameraMode
@@ -44,10 +45,17 @@ class ExampleRobolectricTest {
         assertFalse(state.watermarkEnabled)
         assertFalse(state.creativeFiltersEnabled)
         assertFalse(state.aiSceneOptimizerEnabled)
+        assertTrue(state.aiAutoEditAfterCaptureEnabled)
         assertEquals(PhotoFilterPreset.ORIGINAL, state.activeLut)
         assertEquals(LogProfile.STANDARD_REC709, state.activeLogProfile)
         assertEquals(AiUpscaleMode.ORIGINAL, state.aiUpscaleMode)
         assertEquals(1.0f, state.extraHybridZoomFactor, 0.001f)
+
+        // Toggle AI Auto-Edit After Capture OFF and ON
+        viewModel.toggleAiAutoEditAfterCapture()
+        assertFalse(viewModel.uiState.value.aiAutoEditAfterCaptureEnabled)
+        viewModel.toggleAiAutoEditAfterCapture()
+        assertTrue(viewModel.uiState.value.aiAutoEditAfterCaptureEnabled)
 
         // All zoom profiles have neutral 1.0f multipliers and 0 overlay alpha (no painterly smearing)
         ZoomOptimizationProfile.entries.forEach { profile ->
@@ -58,7 +66,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `cameraViewModel cycles AiUpscaleMode and OnDeviceSuperResolutionEngine upscales 2x and 4x`() = runBlocking {
+    fun `cameraViewModel cycles AiUpscaleMode and OnDeviceSuperResolutionEngine upscales with AI Auto-Edit recipe`() = runBlocking {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val viewModel = CameraViewModel(app)
 
@@ -75,13 +83,22 @@ class ExampleRobolectricTest {
         viewModel.cycleAiUpscaleMode()
         assertEquals(AiUpscaleMode.ORIGINAL, viewModel.uiState.value.aiUpscaleMode)
 
-        // Verify tiled background super-resolution produces 2x dimensions and preserves source bitmap
+        // Verify On-Device Histogram AI Auto-Edit Recipe + Tiled Super-Resolution
+        val aiRepo = AiSceneOptimizerRepository()
         val srEngine = OnDeviceSuperResolutionEngine(app)
         val src = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888).apply {
             eraseColor(Color.rgb(60, 140, 80))
         }
+        val recipe = aiRepo.computeOnDeviceHistogramAutoEditRecipe(src, upscaleFactor = 2)
+        assertEquals(2, recipe.upscaleFactor)
+        assertTrue(recipe.styleTitle.isNotBlank())
+
         var lastProgress = 0
-        val res2x = srEngine.upscaleBitmapTiled(src, AiUpscaleMode.UPSCALE_2X) { pct ->
+        val res2x = srEngine.upscaleBitmapTiled(
+            source = src,
+            mode = AiUpscaleMode.UPSCALE_2X,
+            recipe = recipe
+        ) { pct ->
             lastProgress = pct
         }
         assertEquals(128, res2x.bitmap.width)
@@ -90,7 +107,7 @@ class ExampleRobolectricTest {
         assertEquals(48, src.height)
         assertEquals(100, lastProgress)
 
-        // Verify MediaItem variant badges distinguish ORIGINAL vs AI UPSCALE 2x / 4x
+        // Verify MediaItem variant badges distinguish ORIGINAL vs AI EDIT + 2x / 4x vs AI UPSCALE 2x / 4x
         val origItem = MediaItem(
             id = 1L,
             uri = Uri.EMPTY,
@@ -103,10 +120,21 @@ class ExampleRobolectricTest {
         )
         val ai2xItem = origItem.copy(id = 2L, displayName = "IMG_20261113_160000_AI2x.jpg", width = 8192, height = 6144)
         val ai4xItem = origItem.copy(id = 3L, displayName = "IMG_20261113_160000_AI4x.jpg", width = 16384, height = 12288)
+        val aiEdit2xItem = origItem.copy(id = 4L, displayName = "IMG_20261113_160000_AI_EDIT_2x.jpg", width = 8192, height = 6144)
+        val aiEdit4xItem = origItem.copy(id = 5L, displayName = "IMG_20261113_160000_AI_EDIT_4x.jpg", width = 16384, height = 12288)
+        val honorAiItem = origItem.copy(id = 6L, displayName = "IMG_20261113_160000_HONOR_AI_AIGC_DETAIL.jpg", width = 2048, height = 2048)
 
         assertEquals("ORIGINAL", origItem.variantBadge)
         assertEquals("AI UPSCALE 2x", ai2xItem.variantBadge)
         assertEquals("AI UPSCALE 4x", ai4xItem.variantBadge)
+        assertEquals("AI EDIT + 2x", aiEdit2xItem.variantBadge)
+        assertEquals("AI EDIT + 4x", aiEdit4xItem.variantBadge)
+        assertEquals("HONOR AI GEN", honorAiItem.variantBadge)
+
+        // Verify Honor 600 AI Generation Presets
+        assertEquals(com.example.model.HonorAiGenPreset.AIGC_SUPER_RES, viewModel.uiState.value.selectedHonorAiPreset)
+        viewModel.selectHonorAiPreset(com.example.model.HonorAiGenPreset.HARCOURT_STUDIO)
+        assertEquals(com.example.model.HonorAiGenPreset.HARCOURT_STUDIO, viewModel.uiState.value.selectedHonorAiPreset)
     }
 
     @Test

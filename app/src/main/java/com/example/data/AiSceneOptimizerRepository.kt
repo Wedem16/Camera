@@ -4,16 +4,23 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import com.example.model.AiAutoEditRecipe
 import com.example.model.GeminiSceneCritique
+import com.example.model.HonorAiGenPreset
+import com.example.model.PhotoFilterPreset
 import com.example.model.RealTimeSceneMetrics
 import com.example.model.SceneCategory
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.ImagePart
+import com.google.firebase.ai.type.ResponseModality
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import kotlin.math.abs
@@ -35,6 +42,24 @@ class AiSceneOptimizerRepository {
         )
     )
 
+    private val autoEditSchema = Schema.obj(
+        properties = mapOf(
+            "styleTitle" to Schema.string(description = "Short 2-4 word title of the AI photo mastering profile (e.g., Natural HDR Master, Golden Hour Warmth, Night Shadow Lift)"),
+            "summary" to Schema.string(description = "Concise 1-sentence description of the exposure, color, and detail adjustments applied"),
+            "recommendedLut" to Schema.enumeration(
+                values = PhotoFilterPreset.entries.map { it.name },
+                description = "Recommended preset name (prefer ORIGINAL for natural color, or a subtle film/travel LUT when appropriate)"
+            ),
+            "lutIntensity" to Schema.double(description = "Subtle blend strength for the LUT between 0.0 and 0.55"),
+            "brightness" to Schema.double(description = "Brightness offset between -22.0 and 22.0 to balance exposure"),
+            "contrast" to Schema.double(description = "Contrast multiplier between 0.92 and 1.16 for natural dynamic range"),
+            "saturation" to Schema.double(description = "Saturation multiplier between 0.94 and 1.15 for natural colors without oversaturation"),
+            "warmth" to Schema.double(description = "Color temperature warmth shift between -16.0 and 16.0"),
+            "vignette" to Schema.double(description = "Subtle optical vignette between 0.0 and 0.16"),
+            "detailSharpness" to Schema.double(description = "Unsharp mask detail amount between 0.18 and 0.36 that preserves natural texture without halos")
+        )
+    )
+
     private val generativeModel by lazy {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
@@ -43,6 +68,72 @@ class AiSceneOptimizerRepository {
                 responseSchema = sceneCritiqueSchema
             }
         )
+    }
+
+    private val autoEditGenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = autoEditSchema
+            }
+        )
+    }
+
+    /**
+     * Honor 600 AIGC Image Reconstruction & Enhancement Model (`gemini-nano-banana-2.1`).
+     * Uses zero-configuration `responseModalities = listOf(ResponseModality.IMAGE)` baseline.
+     */
+    private val honorAiImageGenModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-nano-banana-2.1",
+            generationConfig = generationConfig {
+                responseModalities = listOf(ResponseModality.IMAGE)
+            }
+        )
+    }
+
+    /**
+     * Performs Honor 600 AI Image Generation / AIGC Detail Reconstruction on a captured photo
+     * using `gemini-nano-banana-2.1` (`ResponseModality.IMAGE`).
+     * Passes the input bitmap and reconstruction instructions, returning the synthesized high-detail Bitmap.
+     */
+    suspend fun generateHonorAiReconstructedImage(
+        sourceBitmap: Bitmap,
+        preset: HonorAiGenPreset,
+        customInstruction: String = ""
+    ): Bitmap = withContext(Dispatchers.Default) {
+        val inputScaled = scaleBitmapForAi(sourceBitmap, 1024)
+        val instruction = if (customInstruction.isNotBlank()) {
+            "${preset.promptInstruction} Additional user request: ${customInstruction.trim()}"
+        } else {
+            preset.promptInstruction
+        }
+
+        try {
+            val response = withTimeout(60_000L) {
+                honorAiImageGenModel.generateContent(
+                    content {
+                        image(inputScaled)
+                        text(instruction)
+                    }
+                )
+            }
+            val imagePart = response.candidates.firstOrNull()
+                ?.content?.parts?.filterIsInstance<ImagePart>()
+                ?.firstOrNull()
+
+            imagePart?.image
+                ?: throw IllegalStateException("Honor 600 AI model returned no synthesized image.")
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Honor 600 AI image generation timed out after 60s", e)
+            throw IllegalStateException("Honor 600 AI Generation timed out after 60 seconds. Please try again.")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Honor 600 AI image generation failed", e)
+            throw e
+        }
     }
 
     /**
@@ -88,7 +179,6 @@ class AiSceneOptimizerRepository {
                         i += step
                     }
 
-                    // Estimate warmth from U/V planes if present
                     var warmthScore = 0f
                     if (planes.size >= 3) {
                         val uBuffer = planes[1].buffer
@@ -112,7 +202,6 @@ class AiSceneOptimizerRepository {
                         if (uvSamples > 0) {
                             val avgU = uSum.toFloat() / uvSamples
                             val avgV = vSum.toFloat() / uvSamples
-                            // Positive V (red/amber) vs negative U (blue) indicates warm scene
                             warmthScore = ((avgV - avgU * 0.5f) / 48f).coerceIn(-1f, 1f)
                         }
                     }
@@ -169,6 +258,194 @@ class AiSceneOptimizerRepository {
     }
 
     /**
+     * Generates an AI Post-Capture Auto-Edit & Mastering Recipe for a captured photo.
+     * 1. First computes fast on-device luminance, shadow/highlight ratio, and RGB color-balance metrics.
+     * 2. Requests multimodal Gemini 3.8 Flash mastering parameters (`autoEditGenerativeModel`),
+     *    falling back seamlessly to the on-device histogram-driven recipe if offline.
+     */
+    suspend fun generateAiAutoEditRecipe(
+        capturedBitmap: Bitmap,
+        upscaleFactor: Int = 2
+    ): AiAutoEditRecipe = withContext(Dispatchers.Default) {
+        val fallbackRecipe = computeOnDeviceHistogramAutoEditRecipe(capturedBitmap, upscaleFactor)
+        val previewBitmap = scaleBitmapForAi(capturedBitmap, 640)
+
+        val prompt = """
+            You are an expert computational photography colorist optimizing a smartphone photo captured on an Honor 600 camera.
+            Analyze the image's exposure, shadow detail, highlight clipping, foliage/skin textures, and white balance.
+            Return a subtle, natural post-capture mastering recipe that improves dynamic range, color accuracy, and crispness WITHOUT oversharpening, haloing, or artificial oversaturation.
+        """.trimIndent()
+
+        try {
+            val response = withTimeout(30_000L) {
+                autoEditGenerativeModel.generateContent(
+                    content {
+                        image(previewBitmap)
+                        text(prompt)
+                    }
+                )
+            }
+            val rawJson = response.text
+            if (rawJson.isNullOrBlank()) return@withContext fallbackRecipe
+
+            val json = JSONObject(rawJson)
+            val lutName = json.optString("recommendedLut", PhotoFilterPreset.ORIGINAL.name)
+            val lutPreset = runCatching { PhotoFilterPreset.valueOf(lutName) }
+                .getOrDefault(PhotoFilterPreset.ORIGINAL)
+
+            AiAutoEditRecipe(
+                styleTitle = json.optString("styleTitle", fallbackRecipe.styleTitle),
+                summary = json.optString("summary", fallbackRecipe.summary),
+                recommendedLut = lutPreset,
+                lutIntensity = json.optDouble("lutIntensity", 0.25).toFloat().coerceIn(0f, 0.55f),
+                brightness = json.optDouble("brightness", fallbackRecipe.brightness.toDouble())
+                    .toFloat().coerceIn(-22f, 22f),
+                contrast = json.optDouble("contrast", fallbackRecipe.contrast.toDouble())
+                    .toFloat().coerceIn(0.92f, 1.16f),
+                saturation = json.optDouble("saturation", fallbackRecipe.saturation.toDouble())
+                    .toFloat().coerceIn(0.94f, 1.15f),
+                warmth = json.optDouble("warmth", fallbackRecipe.warmth.toDouble())
+                    .toFloat().coerceIn(-16f, 16f),
+                vignette = json.optDouble("vignette", fallbackRecipe.vignette.toDouble())
+                    .toFloat().coerceIn(0f, 0.16f),
+                detailSharpness = json.optDouble("detailSharpness", fallbackRecipe.detailSharpness.toDouble())
+                    .toFloat().coerceIn(0.18f, 0.36f),
+                upscaleFactor = upscaleFactor,
+                usedCloudGemini = true
+            )
+        } catch (e: CancellationException) {
+            if (e is TimeoutCancellationException) {
+                Log.w(TAG, "Gemini Auto-Edit timed out; using on-device histogram AI Auto-Edit recipe")
+                return@withContext fallbackRecipe
+            }
+            throw e
+        } catch (e: Exception) {
+            Log.i(TAG, "Using on-device histogram AI Auto-Edit recipe (${e.message})")
+            fallbackRecipe
+        }
+    }
+
+    /**
+     * Deterministic On-Device Histogram & Color-Balance Auto-Edit analyzer.
+     * Samples the captured bitmap to measure shadow crushing, highlight clipping, green foliage
+     * dominance, and color cast, producing a natural HDR & micro-contrast recipe immediately.
+     */
+    fun computeOnDeviceHistogramAutoEditRecipe(
+        bitmap: Bitmap,
+        upscaleFactor: Int = 2
+    ): AiAutoEditRecipe {
+        val w = bitmap.width.coerceAtLeast(1)
+        val h = bitmap.height.coerceAtLeast(1)
+        val stepX = (w / 48).coerceAtLeast(1)
+        val stepY = (h / 48).coerceAtLeast(1)
+
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var lumaSum = 0L
+        var darkPixels = 0
+        var brightPixels = 0
+        var foliagePixels = 0
+        var totalSamples = 0
+
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val px = bitmap.getPixel(x, y)
+                val r = (px shr 16) and 0xFF
+                val g = (px shr 8) and 0xFF
+                val b = px and 0xFF
+                val luma = (r * 77 + g * 150 + b * 29) shr 8
+
+                rSum += r
+                gSum += g
+                bSum += b
+                lumaSum += luma
+
+                if (luma < 50) darkPixels++
+                if (luma > 210) brightPixels++
+                if (g > r + 12 && g > b + 12 && luma in 35..200) foliagePixels++
+
+                totalSamples++
+                x += stepX
+            }
+            y += stepY
+        }
+
+        if (totalSamples == 0) {
+            return AiAutoEditRecipe(upscaleFactor = upscaleFactor)
+        }
+
+        val avgLuma = lumaSum.toFloat() / totalSamples
+        val avgR = rSum.toFloat() / totalSamples
+        val avgB = bSum.toFloat() / totalSamples
+        val darkRatio = darkPixels.toFloat() / totalSamples
+        val brightRatio = brightPixels.toFloat() / totalSamples
+        val foliageRatio = foliagePixels.toFloat() / totalSamples
+
+        // 1. Exposure / Shadow recovery without blowing out highlights
+        val brightnessShift = when {
+            avgLuma < 75f -> ((95f - avgLuma) * 0.26f).coerceIn(4f, 16f)
+            avgLuma > 180f -> -((avgLuma - 170f) * 0.22f).coerceIn(2f, 12f)
+            darkRatio > 0.32f && brightRatio < 0.10f -> 8f
+            else -> 3f
+        }
+
+        // 2. Natural contrast expansion
+        val contrastMult = when {
+            darkRatio > 0.25f && brightRatio > 0.20f -> 1.03f // High contrast scene: keep gentle
+            avgLuma < 70f -> 1.07f
+            else -> 1.06f
+        }
+
+        // 3. Natural color saturation & auto white-balance warmth correction
+        val saturationMult = if (foliageRatio > 0.18f) {
+            1.04f // Gentle on foliage to preserve natural leaf greens
+        } else {
+            1.07f
+        }
+
+        val redBlueDelta = avgR - avgB
+        val warmthShift = when {
+            redBlueDelta < -14f -> 5f  // Neutralize overly cool/blue cast
+            redBlueDelta > 28f -> -3f  // Tame extreme orange cast slightly
+            else -> 2f
+        }
+
+        // 4. Adaptive unsharp mask detail (gentler on foliage/night noise, crisper on well-lit scenes)
+        val detailSharpness = when {
+            avgLuma < 65f -> 0.20f
+            foliageRatio > 0.20f -> 0.24f
+            else -> 0.30f
+        }
+
+        val styleTitle = when {
+            avgLuma < 68f -> "AI Night Shadow Recovery"
+            foliageRatio > 0.18f -> "AI Natural Foliage & Detail"
+            darkRatio > 0.22f && brightRatio > 0.18f -> "AI Balanced Dynamic HDR"
+            else -> "AI True-Tone Clarity Master"
+        }
+
+        val summary = "Auto-tuned exposure (${String.format("%+.0f", brightnessShift)}), contrast (${String.format("%.2fx", contrastMult)}), and ${upscaleFactor}x micro-detail upscale."
+
+        return AiAutoEditRecipe(
+            styleTitle = styleTitle,
+            summary = summary,
+            recommendedLut = PhotoFilterPreset.ORIGINAL,
+            lutIntensity = 0f,
+            brightness = brightnessShift,
+            contrast = contrastMult,
+            saturation = saturationMult,
+            warmth = warmthShift,
+            vignette = 0.03f,
+            detailSharpness = detailSharpness,
+            upscaleFactor = upscaleFactor,
+            usedCloudGemini = false
+        )
+    }
+
+    /**
      * Runs multimodal Gemini 3.8 Flash scene critique on a scaled viewfinder bitmap.
      */
     suspend fun analyzeFrameWithGemini(
@@ -176,13 +453,12 @@ class AiSceneOptimizerRepository {
         currentModeLabel: String,
         detectedSceneLabel: String
     ): GeminiSceneCritique {
-        // Scale down bitmap to max 768px edge so payload is well under 20MB and ultra-fast
         val scaledBitmap = scaleBitmapForAi(frameBitmap, 768)
         val prompt = """
-            You are the built-in Pro Photography Coach inside the Samsung Galaxy HD Camera app.
+            You are the built-in Pro Photography Coach inside the camera app.
             The user is currently in $currentModeLabel mode, and the on-device sensor detected: $detectedSceneLabel.
             Analyze this camera viewfinder frame for composition, subject lighting, dynamic range, and color balance.
-            Provide concise, practical mobile photography coaching and exact manual Pro settings (ISO, shutter speed, Kelvin white balance, and EV shift) to capture the best flagship shot.
+            Provide concise, practical mobile photography coaching and exact manual Pro settings (ISO, shutter speed, Kelvin white balance, and EV shift) to capture the best shot.
         """.trimIndent()
 
         try {
