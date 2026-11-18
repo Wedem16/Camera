@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -11,6 +16,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -37,16 +43,22 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.FaceRetouchingNatural
+import androidx.compose.material.icons.filled.FilterFrames
+import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,7 +82,9 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -78,6 +92,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -101,10 +116,12 @@ import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
 import com.example.model.LogProfile
 import com.example.model.PhotoFilterPreset
+import com.example.model.ProCameraSettings
 import com.example.model.TimerSetting
 import com.example.ui.components.AiSceneCoachBottomSheet
 import com.example.ui.components.BitrateSelectorBottomSheet
 import com.example.ui.components.CameraSettingsDialog
+import com.example.ui.components.HonorQuickMenuPopupCard
 import com.example.ui.components.LutAndLogBottomSheet
 import com.example.ui.components.MoreModesBottomSheet
 import com.example.ui.components.ProControlsOverlay
@@ -123,6 +140,7 @@ import com.example.viewmodel.CameraUiState
 import com.example.viewmodel.CameraViewModel
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.roundToInt
 
 @Composable
@@ -156,25 +174,81 @@ fun CameraViewfinderScreen(
         onDispose { }
     }
 
-    // Live Android ColorMatrix is ONLY active when creativeFiltersEnabled is toggled ON in Settings
+    // Real-Time Horizon Level Sensor (Accelerometer tilt angle in degrees)
+    var deviceRollDegrees by remember { mutableFloatStateOf(0f) }
+    DisposableEffect(context, state.levelEnabled) {
+        if (!state.levelEnabled) {
+            onDispose { }
+        } else {
+            val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            val accelSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent?) {
+                    val values = event?.values ?: return
+                    if (values.size >= 2) {
+                        val ax = values[0]
+                        val ay = values[1]
+                        val rawDeg = Math.toDegrees(atan2(ax.toDouble(), ay.toDouble())).toFloat()
+                        // Smooth low-pass filter so the level line glides without jitter
+                        deviceRollDegrees = deviceRollDegrees * 0.82f + rawDeg * 0.18f
+                    }
+                }
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            }
+            if (sensorManager != null && accelSensor != null) {
+                sensorManager.registerListener(listener, accelSensor, SensorManager.SENSOR_DELAY_UI)
+            }
+            onDispose {
+                sensorManager?.unregisterListener(listener)
+            }
+        }
+    }
+
+    // Live Android ColorMatrix combining Creative LUT/Log (when enabled) AND Pro Mode Manual Overrides
     val liveAndroidColorMatrix = remember(
         state.creativeFiltersEnabled,
         state.activeLut,
         state.lutIntensity,
-        state.activeLogProfile
+        state.activeLogProfile,
+        state.activeMode,
+        state.proSettings,
+        state.hardwareCapabilities.exposureStepEv
     ) {
-        if (!state.creativeFiltersEnabled ||
-            (state.activeLut == PhotoFilterPreset.ORIGINAL && state.activeLogProfile == LogProfile.STANDARD_REC709)
-        ) {
-            null
-        } else {
-            MediaGalleryRepository.buildCombinedColorMatrix(
-                lut = state.activeLut,
-                lutIntensity = state.lutIntensity,
-                logProfile = state.activeLogProfile
+        val hasCreative = state.creativeFiltersEnabled &&
+            (state.activeLut != PhotoFilterPreset.ORIGINAL || state.activeLogProfile != LogProfile.STANDARD_REC709)
+        val proMatrix = if (state.activeMode == CameraMode.PRO && state.proSettings.hasAnyManualOverride) {
+            MediaGalleryRepository.buildProManualColorMatrix(
+                proSettings = state.proSettings,
+                exposureStepEv = state.hardwareCapabilities.exposureStepEv
             )
+        } else {
+            null
+        }
+
+        when {
+            hasCreative && proMatrix != null -> {
+                MediaGalleryRepository.buildCombinedColorMatrix(
+                    lut = state.activeLut,
+                    lutIntensity = state.lutIntensity,
+                    logProfile = state.activeLogProfile
+                ).apply { postConcat(proMatrix) }
+            }
+            hasCreative -> {
+                MediaGalleryRepository.buildCombinedColorMatrix(
+                    lut = state.activeLut,
+                    lutIntensity = state.lutIntensity,
+                    logProfile = state.activeLogProfile
+                )
+            }
+            proMatrix != null -> proMatrix
+            else -> null
         }
     }
+
+    // Draggable Floating Shutter Button state
+    var floatingShutterOffsetX by remember { mutableFloatStateOf(240f) }
+    var floatingShutterOffsetY by remember { mutableFloatStateOf(780f) }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -182,6 +256,8 @@ fun CameraViewfinderScreen(
             .background(AmoledBlack)
     ) {
         val density = LocalDensity.current
+        val maxWidthPx = with(density) { maxWidth.toPx() }
+        val maxHeightPx = with(density) { maxHeight.toPx() }
 
         // 1. Live CameraX Viewfinder Layer
         Box(
@@ -223,12 +299,15 @@ fun CameraViewfinderScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // 2. Composition Grid & Framing Guides
+            // 2. Composition Grid, Horizon Level Indicator, Pro Focus Peaking & Mode Guides
             ViewfinderModeOverlayCanvas(
                 mode = state.activeMode,
                 gridLinesEnabled = state.gridLinesEnabled,
+                levelEnabled = state.levelEnabled,
+                deviceRollDegrees = deviceRollDegrees,
                 portraitBlurStrength = state.portraitBlurStrength,
-                manualFocusActive = state.activeMode == CameraMode.PRO && state.proSettings.manualFocusDistance != null,
+                proSettings = state.proSettings,
+                exposureStepEv = state.hardwareCapabilities.exposureStepEv,
                 creativeFiltersEnabled = state.creativeFiltersEnabled,
                 activeLut = state.activeLut,
                 activeLogProfile = state.activeLogProfile,
@@ -293,7 +372,44 @@ fun CameraViewfinderScreen(
                 }
             }
 
-            // 4. Shutter Capture Flash Veil
+            // 4. Draggable Floating Shutter Button (when enabled in Honor Settings)
+            if (state.floatingShutterEnabled) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                floatingShutterOffsetX.coerceIn(24f, (maxWidthPx - 180f).coerceAtLeast(24f)).roundToInt(),
+                                floatingShutterOffsetY.coerceIn(180f, (maxHeightPx - 360f).coerceAtLeast(180f)).roundToInt()
+                            )
+                        }
+                        .size(58.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .border(2.5.dp, TextPrimaryWhite, CircleShape)
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                floatingShutterOffsetX = (floatingShutterOffsetX + dragAmount.x)
+                                    .coerceIn(24f, (maxWidthPx - 180f).coerceAtLeast(24f))
+                                floatingShutterOffsetY = (floatingShutterOffsetY + dragAmount.y)
+                                    .coerceIn(180f, (maxHeightPx - 360f).coerceAtLeast(180f))
+                            }
+                        }
+                        .clickable { viewModel.onPrimaryShutterPressed() }
+                        .padding(6.dp)
+                        .testTag("floating_shutter_button")
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(TextPrimaryWhite.copy(alpha = 0.92f))
+                    )
+                }
+            }
+
+            // 5. Shutter Capture Flash Veil
             AnimatedVisibility(
                 visible = state.shutterFlashTriggered,
                 enter = fadeIn(),
@@ -306,7 +422,7 @@ fun CameraViewfinderScreen(
                 )
             }
 
-            // 5. Countdown Timer Overlay (3s, 5s, 10s)
+            // 6. Countdown Timer Overlay (3s, 5s, 10s)
             AnimatedVisibility(
                 visible = state.activeCountdownSec > 0,
                 enter = fadeIn(),
@@ -332,23 +448,32 @@ fun CameraViewfinderScreen(
             }
         }
 
-        // 6. Top Floating Quick Controls Bar
+        // 7. Top Native Honor Black Header Bar & Contextual Pills
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            AmoledBlack.copy(alpha = 0.94f),
+                            AmoledBlack.copy(alpha = 0.65f),
+                            Color.Transparent
+                        )
+                    )
+                )
                 .statusBarsPadding()
-                .padding(top = 8.dp, start = 12.dp, end = 12.dp),
+                .padding(top = 6.dp, start = 12.dp, end = 12.dp, bottom = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            TopQuickSettingsBar(
+            HonorTopHeaderBar(
                 state = state,
                 onCycleFlash = viewModel::cycleFlashSetting,
                 onToggleTorch = viewModel::toggleTorchShortcut,
                 onCycleTimer = viewModel::cycleTimerSetting,
                 onCycleAspectRatio = viewModel::cycleAspectRatio,
                 onToggleResolution = {
-                    if (state.activeMode == CameraMode.VIDEO) {
+                    if (state.isVideoStreamMode) {
                         viewModel.toggleVideoResolution(lifecycleOwner, previewView)
                     } else {
                         viewModel.togglePhotoResolution()
@@ -357,6 +482,13 @@ fun CameraViewfinderScreen(
                 onToggleFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },
+                onOpenFilters = {
+                    if (!state.creativeFiltersEnabled) {
+                        viewModel.toggleCreativeFilters()
+                    }
+                    viewModel.setShowLutLogSheet(true)
+                },
+                onToggleQuickMenu = viewModel::toggleQuickMenuPopup,
                 onOpenSettings = { viewModel.setShowSettingsDialog(true) }
             )
 
@@ -478,7 +610,7 @@ fun CameraViewfinderScreen(
                 }
 
                 // Capture Format Quick Pill (Photo: JPG / RAW+JPG / PNG / WEBP | Video: MP4 / HEVC MP4 / MOV / MKV)
-                val formatBadgeLabel = if (state.activeMode == CameraMode.VIDEO) {
+                val formatBadgeLabel = if (state.isVideoStreamMode) {
                     state.videoFormat.badgeLabel
                 } else {
                     state.photoFormat.badgeLabel
@@ -490,7 +622,7 @@ fun CameraViewfinderScreen(
                         .background(ObsidianGlass)
                         .border(1.dp, GalaxyAmber.copy(alpha = 0.75f), RoundedCornerShape(20.dp))
                         .clickable {
-                            if (state.activeMode == CameraMode.VIDEO) {
+                            if (state.isVideoStreamMode) {
                                 viewModel.cycleVideoFormat()
                             } else {
                                 viewModel.cyclePhotoFormat()
@@ -509,7 +641,7 @@ fun CameraViewfinderScreen(
                 }
 
                 // Video Bitrate Quick Pill (10 - 1000 Mbps)
-                if (state.activeMode == CameraMode.VIDEO) {
+                if (state.isVideoStreamMode) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -537,7 +669,7 @@ fun CameraViewfinderScreen(
                     }
                 }
 
-                // Optional Creative LUT & Log Quick Pill (Only shown when Creative Filters are enabled in Settings)
+                // Optional Creative LUT & Log Quick Pill
                 if (state.creativeFiltersEnabled) {
                     val hasActiveLutOrLog = state.activeLut != PhotoFilterPreset.ORIGINAL ||
                         state.activeLogProfile != LogProfile.STANDARD_REC709
@@ -642,6 +774,32 @@ fun CameraViewfinderScreen(
                 }
             }
 
+            // Honor Contextual Viewfinder Tip Pill (matching "Move further away" in Screenshot_20261118_144446)
+            val contextualTip = when {
+                state.activeMode == CameraMode.SUPER_MACRO -> "Keep 4cm away from subject"
+                state.activeMode == CameraMode.PORTRAIT && state.currentZoomRatio >= 2.0f -> "Move further away"
+                state.activeMode == CameraMode.PRO && state.proSettings.hasAnyManualOverride ->
+                    "PRO MANUAL • ISO ${state.proSettings.formattedIso} • S ${state.proSettings.formattedShutter} • WB ${state.proSettings.formattedWb}"
+                else -> null
+            }
+            if (contextualTip != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xAD2C2C2E))
+                        .padding(horizontal = 18.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        text = contextualTip,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimaryWhite,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
             // Background AI Super-Resolution Progress Indicator Banner
             AnimatedVisibility(
                 visible = state.isUpscalingInProgress,
@@ -715,97 +873,173 @@ fun CameraViewfinderScreen(
             }
         }
 
-        // 7. Bottom Thumb-Zone Camera Controls Deck
+        // 8. Bottom Honor Camera Control Deck (`Screenshot_20261118_144446` & `144457`)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .widthIn(max = 600.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color.Transparent,
-                            AmoledBlack.copy(alpha = 0.78f),
-                            AmoledBlack.copy(alpha = 0.95f)
-                        )
-                    )
-                )
-                .navigationBarsPadding()
-                .padding(top = 12.dp, bottom = 12.dp),
+                .widthIn(max = 600.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Mode-Specific Overlay Sliders (Pro 6-Column Deck / Portrait Bokeh / Beauty)
             when (state.activeMode) {
                 CameraMode.PRO -> {
                     ProControlsOverlay(
                         proSettings = state.proSettings,
                         activeTab = state.activeProTab,
                         capabilities = state.hardwareCapabilities,
+                        photoFormat = state.photoFormat,
                         histogramBins = state.sceneMetrics.histogramBins,
                         averageLuminance = state.sceneMetrics.averageLuminance,
                         onSelectTab = viewModel::selectProTab,
+                        onUpdateMetering = viewModel::updateProMeteringMode,
                         onUpdateIso = viewModel::updateProIso,
                         onUpdateShutter = viewModel::updateProShutter,
                         onUpdateWhiteBalance = viewModel::updateProWhiteBalance,
                         onUpdateFocus = viewModel::updateProManualFocus,
+                        onToggleFocusPeaking = viewModel::toggleProFocusPeaking,
                         onUpdateExposureIndex = viewModel::updateProExposureIndex,
+                        onCyclePhotoFormat = viewModel::cyclePhotoFormat,
                         onResetPro = viewModel::resetProSettings
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
                 CameraMode.PORTRAIT -> {
                     AuxiliaryEffectSliderBar(
-                        label = "BOKEH BLUR",
+                        label = "APERTURE",
                         valueLabel = "f/${String.format(Locale.US, "%.1f", 16f - state.portraitBlurStrength * 14.6f)}",
                         value = state.portraitBlurStrength,
                         onValueChange = viewModel::setPortraitBlurStrength
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
                 CameraMode.BEAUTY -> {
                     AuxiliaryEffectSliderBar(
-                        label = "SKIN TONE",
+                        label = "BEAUTY",
                         valueLabel = "${(state.beautySmoothness * 100).toInt()}%",
                         value = state.beautySmoothness,
                         onValueChange = viewModel::setBeautySmoothness
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
                 else -> Unit
             }
 
-            // Optical / Logical Zoom Selector Bar (0.6x, 1x, 2x, 3x, 5x, 10x)
-            ZoomPresetSelectorBar(
-                currentZoom = state.currentZoomRatio,
-                presets = state.hardwareCapabilities.zoomPresets,
+            // Honor Floating Viewfinder Overlay Row (Left Bokeh/Beauty icons, Center Zoom Capsule, Right AI/LUT icons)
+            HonorFloatingViewfinderRow(
+                state = state,
+                onSelectPortrait = {
+                    if (state.activeMode == CameraMode.PORTRAIT) {
+                        viewModel.selectMode(CameraMode.PHOTO)
+                    } else {
+                        viewModel.selectMode(CameraMode.PORTRAIT)
+                    }
+                },
+                onSelectBeauty = {
+                    if (state.activeMode == CameraMode.BEAUTY) {
+                        viewModel.selectMode(CameraMode.PHOTO)
+                    } else {
+                        viewModel.selectMode(CameraMode.BEAUTY)
+                    }
+                },
+                onToggleAiScene = viewModel::toggleAiSceneOptimizer,
+                onOpenLutFrame = {
+                    if (!state.creativeFiltersEnabled) {
+                        viewModel.toggleCreativeFilters()
+                    }
+                    viewModel.setShowLutLogSheet(true)
+                },
                 onSelectZoom = viewModel::setZoomRatio
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Shooting Mode Carousel + MORE Button
-            ShootingModeCarousel(
-                activeMode = state.activeMode,
-                pinnedModes = state.pinnedModes,
-                onSelectMode = viewModel::selectMode,
-                onOpenMore = { viewModel.setShowMoreModesSheet(true) }
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Primary Shutter / Video Record / Gallery / Switch Lens Deck
-            BottomShutterDeck(
-                state = state,
-                onOpenGallery = viewModel::openGallery,
-                onPrimaryShutter = viewModel::onPrimaryShutterPressed,
-                onTogglePauseVideo = viewModel::toggleVideoPauseResume,
-                onCaptureLiveSnapshot = viewModel::executeImmediatePhotoCapture,
-                onSwitchLens = {
-                    viewModel.toggleLensFacing(lifecycleOwner, previewView)
+            // Pure Black Honor Bottom Deck (Chevron `^`, Mode Carousel, Shutter Row)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AmoledBlack)
+                    .navigationBarsPadding()
+                    .padding(top = 4.dp, bottom = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Up-Chevron `^` button that opens the Honor Frosted Quick Menu Card (Screenshot_20261118_144446)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { viewModel.toggleQuickMenuPopup() }
+                        .padding(horizontal = 18.dp, vertical = 2.dp)
+                        .testTag("bottom_quick_menu_chevron")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowUp,
+                        contentDescription = "Open Quick Menu",
+                        tint = TextSecondaryZinc,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
+
+                // Honor Uppercase Mode Carousel (NIGHT, PORTRAIT, PHOTO, VIDEO, PRO, MORE)
+                ShootingModeCarousel(
+                    activeMode = state.activeMode,
+                    pinnedModes = state.pinnedModes,
+                    onSelectMode = viewModel::selectMode,
+                    onOpenMore = { viewModel.setShowMoreModesSheet(true) }
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Primary Shutter / Video Record / Gallery / Switch Lens Deck
+                BottomShutterDeck(
+                    state = state,
+                    onOpenGallery = viewModel::openGallery,
+                    onPrimaryShutter = viewModel::onPrimaryShutterPressed,
+                    onTogglePauseVideo = viewModel::toggleVideoPauseResume,
+                    onCaptureLiveSnapshot = viewModel::executeImmediatePhotoCapture,
+                    onSwitchLens = {
+                        viewModel.toggleLensFacing(lifecycleOwner, previewView)
+                    }
+                )
+            }
+        }
+
+        // 9. Honor Frosted Quick Menu Popup Card Overlay (`Screenshot_20261118_144502`)
+        AnimatedVisibility(
+            visible = state.showQuickMenuPopup,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 175.dp)
+        ) {
+            HonorQuickMenuPopupCard(
+                state = state,
+                onCycleFlash = viewModel::cycleFlashSetting,
+                onToggleSpecifications = {
+                    if (state.isVideoStreamMode) {
+                        viewModel.toggleVideoResolution(lifecycleOwner, previewView)
+                    } else {
+                        viewModel.togglePhotoResolution()
+                    }
+                },
+                onCycleAspectRatio = viewModel::cycleAspectRatio,
+                onToggleMuteAudio = viewModel::toggleMute,
+                onOpenFilters = {
+                    if (!state.creativeFiltersEnabled) {
+                        viewModel.toggleCreativeFilters()
+                    }
+                    viewModel.setShowLutLogSheet(true)
+                },
+                onToggleGridlines = viewModel::toggleGridLines,
+                onToggleLevel = viewModel::toggleLevel,
+                onCycleAiUpscale = viewModel::cycleAiUpscaleMode,
+                onOpenFullSettings = { viewModel.setShowSettingsDialog(true) },
+                onDismiss = { viewModel.setShowQuickMenuPopup(false) }
             )
         }
 
-        // Modal Sheets & Dialogs
+        // 10. Modal Sheets & Full-Screen Honor Dialogs
         if (state.showLutLogSheet) {
             LutAndLogBottomSheet(
                 state = state,
@@ -856,6 +1090,10 @@ fun CameraViewfinderScreen(
                 onToggleCreativeFilters = viewModel::toggleCreativeFilters,
                 onTogglePhotoResolution = viewModel::togglePhotoResolution,
                 onCyclePhotoFormat = viewModel::cyclePhotoFormat,
+                onCycleAspectRatio = viewModel::cycleAspectRatio,
+                onCycleFocalLength = viewModel::cycleDefaultFocalLength,
+                onToggleRecommendFilters = viewModel::toggleRecommendFilters,
+                onToggleKeepOriginalWithAiEnhance = viewModel::toggleKeepOriginalWithAiEnhance,
                 onToggleVideoResolution = {
                     viewModel.toggleVideoResolution(lifecycleOwner, previewView)
                 },
@@ -863,17 +1101,310 @@ fun CameraViewfinderScreen(
                 onToggleVideoFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },
+                onToggleAutoFpsLowLight = viewModel::toggleAutoFpsLowLight,
+                onToggleLockWhiteBalanceInVideo = viewModel::toggleLockWhiteBalanceInVideo,
+                onToggleEfficientVideoFormat = viewModel::toggleEfficientVideoFormat,
+                onToggleScreenOffRecording = viewModel::toggleScreenOffRecording,
                 onOpenBitrateSheet = { viewModel.setShowBitrateSheet(true) },
                 onOpenLutLogSheet = { viewModel.setShowLutLogSheet(true) },
                 onToggleDiagnosticLogs = viewModel::toggleDiagnosticLogsOverlay,
                 onToggleVideoStabilization = viewModel::toggleVideoStabilization,
                 onToggleAiOptimizer = viewModel::toggleAiSceneOptimizer,
+                onCycleTimer = viewModel::cycleTimerSetting,
                 onToggleGridLines = viewModel::toggleGridLines,
+                onToggleLevel = viewModel::toggleLevel,
+                onToggleMute = viewModel::toggleMute,
+                onToggleMirrorReflection = viewModel::toggleMirrorReflection,
+                onToggleFloatingShutter = viewModel::toggleFloatingShutter,
+                onToggleLocationTag = viewModel::toggleLocationTag,
+                onToggleRememberSettings = viewModel::toggleRememberSettings,
+                onToggleAutoLensSwitching = viewModel::toggleAutoLensSwitching,
                 onToggleWatermark = viewModel::toggleWatermark,
                 onToggleVolumeShutter = viewModel::toggleVolumeButtonShutter,
+                onRestoreDefaults = viewModel::restoreDefaultCameraSettings,
                 onDismiss = { viewModel.setShowSettingsDialog(false) }
             )
         }
+    }
+}
+
+/**
+ * Native Honor Camera Top Header Bar (`Screenshot_20261118_144446` & `144457`).
+ * Left: Flash icon, Torch icon, Timer icon, Settings icon.
+ * Right: Filter 3-ring icon, `HDR` / `4K · 60` resolution badge, and 6-dot Quick Menu Grid icon.
+ */
+@Composable
+private fun HonorTopHeaderBar(
+    state: CameraUiState,
+    onCycleFlash: () -> Unit,
+    onToggleTorch: () -> Unit,
+    onCycleTimer: () -> Unit,
+    onCycleAspectRatio: () -> Unit,
+    onToggleResolution: () -> Unit,
+    onToggleFps: () -> Unit,
+    onOpenFilters: () -> Unit,
+    onToggleQuickMenu: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Left Group: Flash + Torch + Timer + Aspect/FPS
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            val flashIcon = when (state.flashSetting) {
+                FlashSetting.AUTO -> Icons.Default.FlashAuto
+                FlashSetting.ON -> Icons.Default.FlashOn
+                FlashSetting.OFF -> Icons.Default.FlashOff
+            }
+            IconButton(
+                onClick = onCycleFlash,
+                modifier = Modifier
+                    .size(40.dp)
+                    .testTag("top_flash_button")
+            ) {
+                Icon(
+                    imageVector = flashIcon,
+                    contentDescription = stringResource(R.string.flash_control_desc),
+                    tint = if (state.flashSetting == FlashSetting.OFF) TextPrimaryWhite else GalaxyAmber,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onToggleTorch,
+                modifier = Modifier
+                    .size(38.dp)
+                    .testTag("top_torch_button")
+            ) {
+                Icon(
+                    imageVector = if (state.torchEnabled) Icons.Default.FlashlightOn else Icons.Default.FlashlightOff,
+                    contentDescription = stringResource(R.string.torch_control_desc),
+                    tint = if (state.torchEnabled) GalaxyAmber else TextPrimaryWhite.copy(alpha = 0.8f),
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onCycleTimer)
+                    .minimumInteractiveComponentSize()
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .testTag("top_timer_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Timer,
+                    contentDescription = stringResource(R.string.timer_control_desc),
+                    tint = if (state.timerSetting == TimerSetting.OFF) TextPrimaryWhite.copy(alpha = 0.8f) else GalaxyAmber,
+                    modifier = Modifier.size(19.dp)
+                )
+                if (state.timerSetting != TimerSetting.OFF) {
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text(
+                        text = state.timerSetting.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GalaxyAmber,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (state.isVideoStreamMode) {
+                TopTextPillButton(
+                    label = state.videoFps.label,
+                    highlighted = state.videoFps.fps == 60,
+                    onClick = onToggleFps,
+                    testTag = "top_fps_button"
+                )
+            } else {
+                TopTextPillButton(
+                    label = state.aspectRatio.label.replace(" 4K", ""),
+                    highlighted = state.aspectRatio.ratioValue == null,
+                    onClick = onCycleAspectRatio,
+                    testTag = "top_aspect_button"
+                )
+            }
+        }
+
+        // Right Group: Honor 3-Ring Filter Icon + HDR / 4K·60 Badge + Quick Menu Grid + Settings Gear
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            IconButton(
+                onClick = onOpenFilters,
+                modifier = Modifier
+                    .size(38.dp)
+                    .testTag("top_filter_ring_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FilterVintage,
+                    contentDescription = "Creative Filters",
+                    tint = if (state.creativeFiltersEnabled && state.activeLut != PhotoFilterPreset.ORIGINAL) {
+                        GalaxyAmber
+                    } else {
+                        TextPrimaryWhite
+                    },
+                    modifier = Modifier.size(21.dp)
+                )
+            }
+
+            // Honor Circular/Pill HDR or 4K·60 Badge
+            val resLabel = if (state.isVideoStreamMode) {
+                "${if (state.videoResolution.widthPx >= 3840) "4K" else "1080"}·${state.videoFps.fps}"
+            } else if (state.activeMode == CameraMode.PORTRAIT || state.activeMode == CameraMode.HDR) {
+                "HDR"
+            } else {
+                state.photoResolution.shortLabel
+            }
+            TopTextPillButton(
+                label = resLabel,
+                highlighted = true,
+                onClick = onToggleResolution,
+                testTag = "top_resolution_button"
+            )
+
+            // Honor 6-Dot Quick Menu Grid Button (`Screenshot_20261118_144446`)
+            IconButton(
+                onClick = onToggleQuickMenu,
+                modifier = Modifier
+                    .size(38.dp)
+                    .testTag("top_quick_menu_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Apps,
+                    contentDescription = "Quick Menu",
+                    tint = if (state.showQuickMenuPopup) GalaxyAmber else TextPrimaryWhite,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .size(38.dp)
+                    .testTag("top_settings_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = stringResource(R.string.settings_control_desc),
+                    tint = TextPrimaryWhite,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Native Honor Viewfinder Floating Bottom Overlay (`Screenshot_20261118_144446`).
+ * Left column: Aperture/Bokeh toggle & Beauty toggle.
+ * Center: Compact translucent capsule Zoom Selector (`0.6x`, `1x`, `2x`, `3x`, `5x`, `10x`).
+ * Right column: AI Camera toggle & Film/LUT frame button.
+ */
+@Composable
+private fun HonorFloatingViewfinderRow(
+    state: CameraUiState,
+    onSelectPortrait: () -> Unit,
+    onSelectBeauty: () -> Unit,
+    onToggleAiScene: () -> Unit,
+    onOpenLutFrame: () -> Unit,
+    onSelectZoom: (Float) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Bottom
+    ) {
+        // Left Floating Column (Bokeh Portrait + Studio Beauty)
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            HonorFloatingCircleIcon(
+                icon = Icons.Default.BlurOn,
+                contentDescription = "Portrait Bokeh",
+                isActive = state.activeMode == CameraMode.PORTRAIT,
+                onClick = onSelectPortrait,
+                testTag = "floating_bokeh_button"
+            )
+            HonorFloatingCircleIcon(
+                icon = Icons.Default.FaceRetouchingNatural,
+                contentDescription = "Beauty Retouch",
+                isActive = state.activeMode == CameraMode.BEAUTY,
+                onClick = onSelectBeauty,
+                testTag = "floating_beauty_button"
+            )
+        }
+
+        // Center Optical / Logical Zoom Selector Bar (`0.6x`, `1x`, `2x`, `3x`, `5x`, `10x`)
+        ZoomPresetSelectorBar(
+            currentZoom = state.currentZoomRatio,
+            presets = state.hardwareCapabilities.zoomPresets,
+            onSelectZoom = onSelectZoom
+        )
+
+        // Right Floating Column (AI Scene Camera + Film/LUT Frame)
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            HonorFloatingCircleIcon(
+                icon = Icons.Default.AutoAwesome,
+                contentDescription = "AI Scene Camera",
+                isActive = state.aiSceneOptimizerEnabled,
+                onClick = onToggleAiScene,
+                testTag = "floating_ai_scene_button"
+            )
+            HonorFloatingCircleIcon(
+                icon = Icons.Default.FilterFrames,
+                contentDescription = "Film & LUT Frames",
+                isActive = state.creativeFiltersEnabled && state.activeLut != PhotoFilterPreset.ORIGINAL,
+                onClick = onOpenLutFrame,
+                testTag = "floating_lut_frame_button"
+            )
+        }
+    }
+}
+
+@Composable
+private fun HonorFloatingCircleIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(Color(0x99242426))
+            .border(
+                width = if (isActive) 1.5.dp else 0.8.dp,
+                color = if (isActive) GalaxyAmber else DividerSubtle,
+                shape = CircleShape
+            )
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (isActive) GalaxyAmber else TextPrimaryWhite,
+            modifier = Modifier.size(20.dp)
+        )
     }
 }
 
@@ -951,121 +1482,6 @@ private fun LiveDiagnosticLogsHud(
 }
 
 @Composable
-private fun TopQuickSettingsBar(
-    state: CameraUiState,
-    onCycleFlash: () -> Unit,
-    onToggleTorch: () -> Unit,
-    onCycleTimer: () -> Unit,
-    onCycleAspectRatio: () -> Unit,
-    onToggleResolution: () -> Unit,
-    onToggleFps: () -> Unit,
-    onOpenSettings: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(ObsidianGlass)
-            .border(1.dp, DividerSubtle, RoundedCornerShape(24.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(
-            onClick = onOpenSettings,
-            modifier = Modifier.testTag("top_settings_button")
-        ) {
-            Icon(
-                imageVector = Icons.Default.Settings,
-                contentDescription = stringResource(R.string.settings_control_desc),
-                tint = TextPrimaryWhite
-            )
-        }
-
-        val flashIcon = when (state.flashSetting) {
-            FlashSetting.AUTO -> Icons.Default.FlashAuto
-            FlashSetting.ON -> Icons.Default.FlashOn
-            FlashSetting.OFF -> Icons.Default.FlashOff
-        }
-        IconButton(
-            onClick = onCycleFlash,
-            modifier = Modifier.testTag("top_flash_button")
-        ) {
-            Icon(
-                imageVector = flashIcon,
-                contentDescription = stringResource(R.string.flash_control_desc),
-                tint = if (state.flashSetting == FlashSetting.OFF) TextPrimaryWhite else GalaxyAmber
-            )
-        }
-
-        IconButton(
-            onClick = onToggleTorch,
-            modifier = Modifier.testTag("top_torch_button")
-        ) {
-            Icon(
-                imageVector = if (state.torchEnabled) Icons.Default.FlashlightOn else Icons.Default.FlashlightOff,
-                contentDescription = stringResource(R.string.torch_control_desc),
-                tint = if (state.torchEnabled) GalaxyAmber else TextPrimaryWhite
-            )
-        }
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(onClick = onCycleTimer)
-                .minimumInteractiveComponentSize()
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-                .testTag("top_timer_button")
-        ) {
-            Icon(
-                imageVector = Icons.Default.Timer,
-                contentDescription = stringResource(R.string.timer_control_desc),
-                tint = if (state.timerSetting == TimerSetting.OFF) TextPrimaryWhite else GalaxyAmber,
-                modifier = Modifier.size(20.dp)
-            )
-            if (state.timerSetting != TimerSetting.OFF) {
-                Spacer(modifier = Modifier.width(3.dp))
-                Text(
-                    text = state.timerSetting.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = GalaxyAmber,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        if (state.activeMode == CameraMode.VIDEO) {
-            TopTextPillButton(
-                label = state.videoFps.label,
-                highlighted = state.videoFps.fps == 60,
-                onClick = onToggleFps,
-                testTag = "top_fps_button"
-            )
-        } else {
-            TopTextPillButton(
-                label = state.aspectRatio.label,
-                highlighted = state.aspectRatio.ratioValue == null,
-                onClick = onCycleAspectRatio,
-                testTag = "top_aspect_button"
-            )
-        }
-
-        val resLabel = if (state.activeMode == CameraMode.VIDEO) {
-            state.videoResolution.shortLabel
-        } else {
-            state.photoResolution.shortLabel
-        }
-        TopTextPillButton(
-            label = resLabel,
-            highlighted = true,
-            onClick = onToggleResolution,
-            testTag = "top_resolution_button"
-        )
-    }
-}
-
-@Composable
 private fun TopTextPillButton(
     label: String,
     highlighted: Boolean,
@@ -1075,21 +1491,21 @@ private fun TopTextPillButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (highlighted) GalaxyAmber.copy(alpha = 0.2f) else ObsidianElevated)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (highlighted) GalaxyAmber.copy(alpha = 0.18f) else ObsidianElevated)
             .border(
                 width = 1.dp,
                 color = if (highlighted) GalaxyAmber else DividerSubtle,
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(14.dp)
             )
             .clickable(onClick = onClick)
             .minimumInteractiveComponentSize()
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 9.dp, vertical = 5.dp)
             .testTag(testTag)
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             color = if (highlighted) GalaxyAmber else TextPrimaryWhite,
             fontWeight = FontWeight.Bold
         )
@@ -1184,6 +1600,10 @@ private fun AuxiliaryEffectSliderBar(
     }
 }
 
+/**
+ * Native Honor Translucent Zoom Capsule (`Screenshot_20261118_144446`).
+ * Active zoom preset is shown in Honor Amber (`#F5A623`) inside a dark circular pill.
+ */
 @Composable
 private fun ZoomPresetSelectorBar(
     currentZoom: Float,
@@ -1192,12 +1612,12 @@ private fun ZoomPresetSelectorBar(
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = Modifier
             .clip(CircleShape)
-            .background(ObsidianGlass)
-            .border(1.dp, DividerSubtle, CircleShape)
-            .padding(horizontal = 10.dp, vertical = 5.dp)
+            .background(Color(0x99242426))
+            .border(0.8.dp, DividerSubtle, CircleShape)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         presets.forEach { preset ->
             val isSelected = abs(currentZoom - preset) < 0.18f
@@ -1207,15 +1627,20 @@ private fun ZoomPresetSelectorBar(
                     val formatted = String.format(Locale.US, "%.1fx", currentZoom)
                     if (formatted.endsWith(".0x")) "${currentZoom.roundToInt()}x" else formatted
                 }
-                else -> "${preset.roundToInt()}x"
+                else -> "${preset.roundToInt()}"
             }
 
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(if (isSelected) 40.dp else 34.dp)
+                    .size(if (isSelected) 36.dp else 30.dp)
                     .clip(CircleShape)
-                    .background(if (isSelected) GalaxyAmber else ObsidianElevated)
+                    .background(if (isSelected) Color(0xFF141416) else Color.Transparent)
+                    .border(
+                        width = if (isSelected) 1.dp else 0.dp,
+                        color = if (isSelected) GalaxyAmber.copy(alpha = 0.65f) else Color.Transparent,
+                        shape = CircleShape
+                    )
                     .clickable { onSelectZoom(preset) }
                     .testTag("zoom_pill_${preset.toString().replace('.', '_')}")
             ) {
@@ -1223,13 +1648,17 @@ private fun ZoomPresetSelectorBar(
                     text = label,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isSelected) AmoledBlack else TextPrimaryWhite
+                    color = if (isSelected) GalaxyAmber else TextPrimaryWhite
                 )
             }
         }
     }
 }
 
+/**
+ * Native Honor Mode Carousel (`NIGHT`, `PORTRAIT`, `PHOTO`, `VIDEO`, `PRO`, `MORE`).
+ * Clean uppercase text with active mode highlighted in Honor Amber (`#F5A623`).
+ */
 @Composable
 private fun ShootingModeCarousel(
     activeMode: CameraMode,
@@ -1245,7 +1674,7 @@ private fun ShootingModeCarousel(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
+            .padding(horizontal = 16.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1256,21 +1685,16 @@ private fun ShootingModeCarousel(
                 modifier = Modifier
                     .padding(horizontal = 4.dp)
                     .clip(CircleShape)
-                    .background(if (selected) ObsidianElevated else Color.Transparent)
-                    .border(
-                        width = if (selected) 1.dp else 0.dp,
-                        color = if (selected) GalaxyAmber.copy(alpha = 0.6f) else Color.Transparent,
-                        shape = CircleShape
-                    )
                     .clickable { onSelectMode(mode) }
                     .minimumInteractiveComponentSize()
-                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
                     .testTag("mode_tab_${mode.name.lowercase()}")
             ) {
                 Text(
                     text = mode.label,
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (selected) GalaxyAmber else TextPrimaryWhite.copy(alpha = 0.8f)
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                    color = if (selected) GalaxyAmber else TextPrimaryWhite.copy(alpha = 0.85f)
                 )
             }
         }
@@ -1282,13 +1706,14 @@ private fun ShootingModeCarousel(
                 .clip(CircleShape)
                 .clickable(onClick = onOpenMore)
                 .minimumInteractiveComponentSize()
-                .padding(horizontal = 14.dp, vertical = 6.dp)
+                .padding(horizontal = 10.dp, vertical = 4.dp)
                 .testTag("mode_tab_more")
         ) {
             Text(
                 text = "MORE",
                 style = MaterialTheme.typography.labelLarge,
-                color = TextSecondaryZinc
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimaryWhite.copy(alpha = 0.85f)
             )
         }
     }
@@ -1320,7 +1745,7 @@ private fun BottomShutterDeck(
             IconButton(
                 onClick = onTogglePauseVideo,
                 modifier = Modifier
-                    .size(56.dp)
+                    .size(54.dp)
                     .clip(CircleShape)
                     .background(ObsidianElevated)
                     .border(1.5.dp, TextPrimaryWhite, CircleShape)
@@ -1337,10 +1762,10 @@ private fun BottomShutterDeck(
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(56.dp)
+                    .size(54.dp)
                     .clip(CircleShape)
                     .background(ObsidianElevated)
-                    .border(2.dp, DividerSubtle, CircleShape)
+                    .border(1.5.dp, DividerSubtle, CircleShape)
                     .clickable(onClick = onOpenGallery)
                     .testTag("open_gallery_button")
             ) {
@@ -1362,19 +1787,19 @@ private fun BottomShutterDeck(
             }
         }
 
-        val isVideoMode = state.activeMode == CameraMode.VIDEO
+        val isVideoMode = state.isVideoStreamMode
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size((78 * shutterScale).dp)
+                .size((76 * shutterScale).dp)
                 .clip(CircleShape)
                 .border(
-                    width = 4.dp,
-                    color = if (state.isRecordingVideo) RecordCrimson else TextPrimaryWhite,
+                    width = 3.5.dp,
+                    color = if (state.isRecordingVideo) RecordCrimson else TextPrimaryWhite.copy(alpha = 0.88f),
                     shape = CircleShape
                 )
                 .clickable(onClick = onPrimaryShutter)
-                .padding(7.dp)
+                .padding(6.dp)
                 .testTag("primary_shutter_button")
         ) {
             if (isVideoMode) {
@@ -1399,9 +1824,7 @@ private fun BottomShutterDeck(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(CircleShape)
-                        .background(
-                            if (state.activeMode == CameraMode.NIGHT) GalaxyAmber else TextPrimaryWhite
-                        )
+                        .background(TextPrimaryWhite)
                 )
             }
         }
@@ -1410,7 +1833,7 @@ private fun BottomShutterDeck(
             IconButton(
                 onClick = onCaptureLiveSnapshot,
                 modifier = Modifier
-                    .size(56.dp)
+                    .size(54.dp)
                     .clip(CircleShape)
                     .background(ObsidianElevated)
                     .border(1.5.dp, TextPrimaryWhite, CircleShape)
@@ -1426,17 +1849,17 @@ private fun BottomShutterDeck(
             IconButton(
                 onClick = onSwitchLens,
                 modifier = Modifier
-                    .size(56.dp)
+                    .size(54.dp)
                     .clip(CircleShape)
-                    .background(ObsidianElevated)
-                    .border(1.5.dp, DividerSubtle, CircleShape)
+                    .background(Color(0xFF1C1C1E))
+                    .clickable(onClick = onSwitchLens)
                     .testTag("switch_camera_button")
             ) {
                 Icon(
                     imageVector = Icons.Default.Cameraswitch,
                     contentDescription = stringResource(R.string.switch_camera_desc),
                     tint = TextPrimaryWhite,
-                    modifier = Modifier.size(26.dp)
+                    modifier = Modifier.size(25.dp)
                 )
             }
         }
@@ -1447,8 +1870,11 @@ private fun BottomShutterDeck(
 private fun ViewfinderModeOverlayCanvas(
     mode: CameraMode,
     gridLinesEnabled: Boolean,
+    levelEnabled: Boolean,
+    deviceRollDegrees: Float,
     portraitBlurStrength: Float,
-    manualFocusActive: Boolean,
+    proSettings: ProCameraSettings,
+    exposureStepEv: Float,
     creativeFiltersEnabled: Boolean,
     activeLut: PhotoFilterPreset,
     activeLogProfile: LogProfile,
@@ -1457,6 +1883,37 @@ private fun ViewfinderModeOverlayCanvas(
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
+        val center = Offset(w / 2f, h * 0.44f)
+
+        // 0. Real-Time Pro Mode Exposure & White Balance Feedback Veil (guarantees visible response on all API levels)
+        if (mode == CameraMode.PRO && proSettings.hasAnyManualOverride) {
+            var evStops = proSettings.exposureCompensationIndex * exposureStepEv
+            proSettings.iso?.let { iso ->
+                evStops += (kotlin.math.ln(iso.toFloat() / 200f) / kotlin.math.ln(2f)) * 0.45f
+            }
+            proSettings.shutterSpeedNs?.let { ns ->
+                evStops += (kotlin.math.ln(ns.toDouble() / 8_000_000.0).toFloat() / kotlin.math.ln(2f)) * 0.40f
+            }
+            if (evStops > 0.12f) {
+                drawRect(color = Color.White.copy(alpha = (evStops * 0.08f).coerceAtMost(0.28f)))
+            } else if (evStops < -0.12f) {
+                drawRect(color = Color.Black.copy(alpha = (abs(evStops) * 0.12f).coerceAtMost(0.42f)))
+            }
+
+            val kelvin = if (proSettings.whiteBalance == com.example.model.WhiteBalancePreset.MANUAL_KELVIN) {
+                proSettings.customKelvin
+            } else {
+                proSettings.whiteBalance.kelvin
+            }
+            if (proSettings.whiteBalance != com.example.model.WhiteBalancePreset.AUTO) {
+                val kDelta = (kelvin - 5500f) / 4500f
+                if (kDelta > 0.05f) {
+                    drawRect(color = Color(0xFFFFA726).copy(alpha = (kDelta * 0.16f).coerceAtMost(0.18f)))
+                } else if (kDelta < -0.05f) {
+                    drawRect(color = Color(0xFF29B6F6).copy(alpha = (abs(kDelta) * 0.16f).coerceAtMost(0.18f)))
+                }
+            }
+        }
 
         // Subtle atmospheric LUT / Log tint overlay ONLY if creative filters are explicitly enabled
         if (creativeFiltersEnabled && activeLut != PhotoFilterPreset.ORIGINAL && lutIntensity > 0.05f) {
@@ -1483,18 +1940,49 @@ private fun ViewfinderModeOverlayCanvas(
             drawLine(gridColor, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), strokeWidth = 1.5f)
         }
 
-        // 2. Portrait Mode Bokeh Framing Guide
+        // 2. Native Honor Center Horizon Level Indicator (`Screenshot_20261118_144446` & `144457`)
+        if (levelEnabled) {
+            val isLevel = abs(deviceRollDegrees) < 2.2f || abs(abs(deviceRollDegrees) - 90f) < 2.2f
+            val levelColor = if (isLevel) GalaxyAmber else Color.White.copy(alpha = 0.68f)
+            val circleRadius = minOf(w, h) * 0.068f
+            val outerSpan = minOf(w, h) * 0.34f
+
+            drawCircle(
+                color = levelColor,
+                radius = circleRadius,
+                center = center,
+                style = Stroke(width = if (isLevel) 3.2f else 2.2f)
+            )
+            rotate(degrees = -deviceRollDegrees, pivot = center) {
+                // Left wing line
+                drawLine(
+                    color = levelColor,
+                    start = Offset(center.x - outerSpan, center.y),
+                    end = Offset(center.x - circleRadius, center.y),
+                    strokeWidth = if (isLevel) 3.2f else 2.0f
+                )
+                // Right wing line
+                drawLine(
+                    color = levelColor,
+                    start = Offset(center.x + circleRadius, center.y),
+                    end = Offset(center.x + outerSpan, center.y),
+                    strokeWidth = if (isLevel) 3.2f else 2.0f
+                )
+            }
+        }
+
+        // 3. Portrait Mode Bokeh Framing Guide
         if (mode == CameraMode.PORTRAIT) {
             val radius = minOf(w, h) * 0.36f
             drawCircle(
                 color = GalaxyAmber.copy(alpha = 0.35f + portraitBlurStrength * 0.35f),
                 radius = radius,
-                center = Offset(w / 2f, h * 0.44f),
+                center = center,
                 style = Stroke(width = 3f)
             )
         }
 
-        // 3. Panorama Mode Level Horizon & Wide Strip Guide
+        // 4. Panorama Mode Level Horizon & Wide Strip Guide
         if (mode == CameraMode.PANORAMA) {
             val stripHeight = h * 0.26f
             val topY = (h - stripHeight) / 2f
@@ -1517,13 +2005,35 @@ private fun ViewfinderModeOverlayCanvas(
             )
         }
 
-        // 4. Pro Manual Focus Peaking Ring Indicator
-        if (manualFocusActive) {
+        // 5. Document Scanner Framing Guide
+        if (mode == CameraMode.SCAN_DOCUMENT) {
+            val docLeft = w * 0.12f
+            val docTop = h * 0.18f
+            val docRight = w * 0.88f
+            val docBottom = h * 0.72f
+            drawRect(
+                color = GalaxyAmber.copy(alpha = 0.85f),
+                topLeft = Offset(docLeft, docTop),
+                size = androidx.compose.ui.geometry.Size(docRight - docLeft, docBottom - docTop),
+                style = Stroke(width = 3.5f)
+            )
+        }
+
+        // 6. Pro Manual Focus Peaking Ring Indicator
+        if (mode == CameraMode.PRO && proSettings.manualFocusDistance != null && proSettings.focusPeakingEnabled) {
+            val dist = proSettings.manualFocusDistance
+            val focusRadius = minOf(w, h) * (0.14f + dist * 0.22f)
             drawCircle(
-                color = EmeraldOptimal.copy(alpha = 0.55f),
-                radius = minOf(w, h) * 0.22f,
-                center = Offset(w / 2f, h * 0.45f),
-                style = Stroke(width = 2.5f)
+                color = EmeraldOptimal.copy(alpha = 0.75f),
+                radius = focusRadius,
+                center = center,
+                style = Stroke(width = 3f)
+            )
+            drawCircle(
+                color = EmeraldOptimal.copy(alpha = 0.35f),
+                radius = focusRadius * 0.65f,
+                center = center,
+                style = Stroke(width = 1.5f)
             )
         }
     }
@@ -1559,7 +2069,7 @@ private fun PermissionOnboardingContent(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "NATIVE SENSOR CAMERA & AI UPSCALE",
+            text = "HONOR 600 CAM • 4K 60FPS & AI SUPER-RES",
             style = MaterialTheme.typography.labelLarge,
             color = GalaxyAmber
         )

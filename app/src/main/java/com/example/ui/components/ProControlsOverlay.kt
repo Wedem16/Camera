@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +47,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.HardwareCapabilities
+import com.example.model.PhotoFormatSetting
 import com.example.model.ProCameraSettings
+import com.example.model.ProMeteringMode
 import com.example.model.ProParameterTab
 import com.example.model.WhiteBalancePreset
 import com.example.ui.theme.AiCyan
@@ -58,8 +60,9 @@ import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianGlass
 import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
+import java.util.Locale
 
-private val ISO_OPTIONS = listOf(null, 50, 100, 200, 400, 800, 1600, 3200)
+private val ISO_OPTIONS = listOf(null, 50, 100, 200, 400, 800, 1600, 3200, 6400)
 
 private val SHUTTER_OPTIONS = listOf<Pair<String, Long?>>(
     "AUTO" to null,
@@ -72,8 +75,13 @@ private val SHUTTER_OPTIONS = listOf<Pair<String, Long?>>(
     "1/60" to 16_666_666L,
     "1/30" to 33_333_333L,
     "1/15" to 66_666_666L,
+    "1/8" to 125_000_000L,
     "1/4" to 250_000_000L,
-    "1s" to 1_000_000_000L
+    "1/2" to 500_000_000L,
+    "1s" to 1_000_000_000L,
+    "2s" to 2_000_000_000L,
+    "4s" to 4_000_000_000L,
+    "8s" to 8_000_000_000L
 )
 
 @Composable
@@ -81,14 +89,18 @@ fun ProControlsOverlay(
     proSettings: ProCameraSettings,
     activeTab: ProParameterTab,
     capabilities: HardwareCapabilities,
+    photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG,
     histogramBins: List<Float>,
     averageLuminance: Float,
     onSelectTab: (ProParameterTab) -> Unit,
+    onUpdateMetering: (ProMeteringMode) -> Unit = {},
     onUpdateIso: (Int?) -> Unit,
     onUpdateShutter: (Long?) -> Unit,
     onUpdateWhiteBalance: (WhiteBalancePreset, Int) -> Unit,
     onUpdateFocus: (Float?) -> Unit,
+    onToggleFocusPeaking: () -> Unit = {},
     onUpdateExposureIndex: (Int) -> Unit,
+    onCyclePhotoFormat: () -> Unit = {},
     onResetPro: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -98,7 +110,7 @@ fun ProControlsOverlay(
             .padding(horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top row: Live Luminance Histogram + Sensor Status + Reset
+        // Top row: Live Luminance Histogram + JPG/RAW Badge + Reset
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -108,32 +120,68 @@ fun ProControlsOverlay(
         ) {
             LiveHistogramBadge(
                 bins = histogramBins,
-                averageLuminance = averageLuminance
+                averageLuminance = averageLuminance,
+                hasManualOverride = proSettings.hasAnyManualOverride
             )
 
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(ObsidianGlass)
-                    .border(1.dp, DividerSubtle, RoundedCornerShape(20.dp))
-                    .clickable(onClick = onResetPro)
-                    .minimumInteractiveComponentSize()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .testTag("pro_reset_button")
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = stringResource(R.string.pro_reset_label),
-                    tint = GalaxyAmber,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.pro_reset_label),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = GalaxyAmber
-                )
+                // Honor Pro Format Badge (JPG / RAW+JPG)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (photoFormat == PhotoFormatSetting.RAW_DNG) {
+                                GalaxyAmber.copy(alpha = 0.22f)
+                            } else {
+                                ObsidianGlass
+                            }
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else DividerSubtle,
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                        .clickable(onClick = onCyclePhotoFormat)
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .testTag("pro_format_badge")
+                ) {
+                    Text(
+                        text = photoFormat.badgeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else TextPrimaryWhite
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(ObsidianGlass)
+                        .border(1.dp, DividerSubtle, RoundedCornerShape(20.dp))
+                        .clickable(onClick = onResetPro)
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("pro_reset_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = stringResource(R.string.pro_reset_label),
+                        tint = GalaxyAmber,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = stringResource(R.string.pro_reset_label),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = GalaxyAmber
+                    )
+                }
             }
         }
 
@@ -149,10 +197,14 @@ fun ProControlsOverlay(
                     .padding(bottom = 8.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(ObsidianGlass)
-                    .border(1.dp, DividerSubtle, RoundedCornerShape(16.dp))
+                    .border(1.dp, GalaxyAmber.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
                     .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
                 when (activeTab) {
+                    ProParameterTab.METERING -> MeteringSelectorRow(
+                        selectedMetering = proSettings.meteringMode,
+                        onSelectMetering = onUpdateMetering
+                    )
                     ProParameterTab.ISO -> IsoSelectorRow(
                         selectedIso = proSettings.iso,
                         onSelectIso = onUpdateIso
@@ -166,11 +218,14 @@ fun ProControlsOverlay(
                         minIndex = capabilities.minExposureIndex,
                         maxIndex = capabilities.maxExposureIndex,
                         stepEv = capabilities.exposureStepEv,
+                        isManualIsoAndShutter = proSettings.iso != null && proSettings.shutterSpeedNs != null,
                         onIndexChanged = onUpdateExposureIndex
                     )
                     ProParameterTab.FOCUS -> FocusSliderRow(
                         focusDistance = proSettings.manualFocusDistance,
-                        onFocusChanged = onUpdateFocus
+                        focusPeakingEnabled = proSettings.focusPeakingEnabled,
+                        onFocusChanged = onUpdateFocus,
+                        onTogglePeaking = onToggleFocusPeaking
                     )
                     ProParameterTab.WB -> WhiteBalanceRow(
                         selectedPreset = proSettings.whiteBalance,
@@ -182,7 +237,7 @@ fun ProControlsOverlay(
             }
         }
 
-        // 5-Column Pro Parameter Telemetry Deck (ISO, SPEED, EV, FOCUS, WB)
+        // Honor 6-Column Pro Parameter Telemetry Deck (M, ISO, S, EV, AF, WB)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -194,10 +249,19 @@ fun ProControlsOverlay(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val evFormatted = String.format(
+                Locale.US,
                 "%+.1f",
                 proSettings.exposureCompensationIndex * capabilities.exposureStepEv
             )
 
+            ProMetricButton(
+                title = "M",
+                value = proSettings.formattedMetering,
+                isActive = activeTab == ProParameterTab.METERING,
+                isManual = proSettings.meteringMode != ProMeteringMode.MATRIX,
+                onClick = { onSelectTab(ProParameterTab.METERING) },
+                testTag = "pro_tab_metering"
+            )
             ProMetricButton(
                 title = "ISO",
                 value = proSettings.formattedIso,
@@ -207,7 +271,7 @@ fun ProControlsOverlay(
                 testTag = "pro_tab_iso"
             )
             ProMetricButton(
-                title = "SPEED",
+                title = "S",
                 value = proSettings.formattedShutter,
                 isActive = activeTab == ProParameterTab.SHUTTER,
                 isManual = proSettings.shutterSpeedNs != null,
@@ -223,7 +287,7 @@ fun ProControlsOverlay(
                 testTag = "pro_tab_ev"
             )
             ProMetricButton(
-                title = "FOCUS",
+                title = "AF",
                 value = proSettings.formattedFocus,
                 isActive = activeTab == ProParameterTab.FOCUS,
                 isManual = proSettings.manualFocusDistance != null,
@@ -245,20 +309,25 @@ fun ProControlsOverlay(
 @Composable
 private fun LiveHistogramBadge(
     bins: List<Float>,
-    averageLuminance: Float
+    averageLuminance: Float,
+    hasManualOverride: Boolean
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
             .background(ObsidianGlass)
-            .border(1.dp, DividerSubtle, RoundedCornerShape(12.dp))
+            .border(
+                width = 1.dp,
+                color = if (hasManualOverride) GalaxyAmber.copy(alpha = 0.7f) else DividerSubtle,
+                shape = RoundedCornerShape(12.dp)
+            )
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
         Canvas(
             modifier = Modifier
-                .width(72.dp)
-                .height(24.dp)
+                .width(68.dp)
+                .height(22.dp)
         ) {
             val count = bins.size.coerceAtLeast(1)
             val barWidth = size.width / count
@@ -280,13 +349,13 @@ private fun LiveHistogramBadge(
         Spacer(modifier = Modifier.width(8.dp))
         Column {
             Text(
-                text = "LUMA",
+                text = if (hasManualOverride) "MANUAL" else "AUTO AE",
                 style = MaterialTheme.typography.labelSmall,
-                color = TextSecondaryZinc,
+                color = if (hasManualOverride) GalaxyAmber else TextSecondaryZinc,
                 fontSize = 9.sp
             )
             Text(
-                text = "${averageLuminance.toInt()}",
+                text = "Luma ${averageLuminance.toInt()}",
                 style = MaterialTheme.typography.labelMedium,
                 color = EmeraldOptimal
             )
@@ -310,13 +379,14 @@ private fun ProMetricButton(
             .background(if (isActive) ObsidianElevated else Color.Transparent)
             .clickable(onClick = onClick)
             .minimumInteractiveComponentSize()
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 7.dp, vertical = 6.dp)
             .testTag(testTag)
     ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall,
-            color = if (isActive) GalaxyAmber else TextSecondaryZinc
+            color = if (isActive || isManual) GalaxyAmber else TextSecondaryZinc,
+            fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
@@ -332,25 +402,82 @@ private fun ProMetricButton(
 }
 
 @Composable
+private fun MeteringSelectorRow(
+    selectedMetering: ProMeteringMode,
+    onSelectMetering: (ProMeteringMode) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "METERING MODE (M)",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondaryZinc
+            )
+            Text(
+                text = selectedMetering.fullTitle,
+                style = MaterialTheme.typography.labelMedium,
+                color = GalaxyAmber
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ProMeteringMode.entries.forEach { mode ->
+                DialChip(
+                    label = mode.shortLabel,
+                    selected = selectedMetering == mode,
+                    onClick = { onSelectMetering(mode) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun IsoSelectorRow(
     selectedIso: Int?,
     onSelectIso: (Int?) -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        ISO_OPTIONS.forEach { isoVal ->
-            val isSelected = selectedIso == isoVal
-            val label = isoVal?.toString() ?: "AUTO"
-            DialChip(
-                label = label,
-                selected = isSelected,
-                onClick = { onSelectIso(isoVal) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "SENSOR SENSITIVITY (ISO 50 – 6400)",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondaryZinc
             )
+            Text(
+                text = selectedIso?.let { "ISO $it (Manual)" } ?: "ISO AUTO",
+                style = MaterialTheme.typography.labelMedium,
+                color = GalaxyAmber,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ISO_OPTIONS.forEach { isoVal ->
+                val isSelected = selectedIso == isoVal
+                val label = isoVal?.toString() ?: "AUTO"
+                DialChip(
+                    label = label,
+                    selected = isSelected,
+                    onClick = { onSelectIso(isoVal) }
+                )
+            }
         }
     }
 }
@@ -360,20 +487,40 @@ private fun ShutterSelectorRow(
     selectedShutterNs: Long?,
     onSelectShutter: (Long?) -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        SHUTTER_OPTIONS.forEach { (label, nsVal) ->
-            val isSelected = selectedShutterNs == nsVal
-            DialChip(
-                label = label,
-                selected = isSelected,
-                onClick = { onSelectShutter(nsVal) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "SHUTTER SPEED (1/4000s – 8s)",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondaryZinc
             )
+            val currentLabel = SHUTTER_OPTIONS.firstOrNull { it.second == selectedShutterNs }?.first ?: "AUTO"
+            Text(
+                text = if (selectedShutterNs == null) "SHUTTER AUTO" else "$currentLabel (Manual)",
+                style = MaterialTheme.typography.labelMedium,
+                color = GalaxyAmber,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SHUTTER_OPTIONS.forEach { (label, nsVal) ->
+                val isSelected = selectedShutterNs == nsVal
+                DialChip(
+                    label = label,
+                    selected = isSelected,
+                    onClick = { onSelectShutter(nsVal) }
+                )
+            }
         }
     }
 }
@@ -384,24 +531,26 @@ private fun ExposureSliderRow(
     minIndex: Int,
     maxIndex: Int,
     stepEv: Float,
+    isManualIsoAndShutter: Boolean,
     onIndexChanged: (Int) -> Unit
 ) {
-    val safeMin = if (minIndex < maxIndex) minIndex else -8
-    val safeMax = if (maxIndex > minIndex) maxIndex else 8
+    val safeMin = if (minIndex < maxIndex) minIndex else -12
+    val safeMax = if (maxIndex > minIndex) maxIndex else 12
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "EXPOSURE COMPENSATION",
+                text = if (isManualIsoAndShutter) "FINE EV TRIM (MANUAL ISO+S)" else "EXPOSURE COMPENSATION (EV)",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondaryZinc
             )
             Text(
-                text = String.format("%+.2f EV", currentIndex * stepEv),
+                text = String.format(Locale.US, "%+.2f EV", currentIndex * stepEv),
                 style = MaterialTheme.typography.labelMedium,
-                color = GalaxyAmber
+                color = GalaxyAmber,
+                fontWeight = FontWeight.Bold
             )
         }
         Slider(
@@ -421,7 +570,9 @@ private fun ExposureSliderRow(
 @Composable
 private fun FocusSliderRow(
     focusDistance: Float?,
-    onFocusChanged: (Float?) -> Unit
+    focusPeakingEnabled: Boolean,
+    onFocusChanged: (Float?) -> Unit,
+    onTogglePeaking: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -431,18 +582,29 @@ private fun FocusSliderRow(
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DialChip(
-                    label = "AF AUTO",
+                    label = "AF-C AUTO",
                     selected = focusDistance == null,
                     onClick = { onFocusChanged(null) }
                 )
                 DialChip(
-                    label = "MANUAL",
+                    label = "MF MANUAL",
                     selected = focusDistance != null,
                     onClick = { if (focusDistance == null) onFocusChanged(0.35f) }
                 )
+                if (focusDistance != null) {
+                    DialChip(
+                        label = if (focusPeakingEnabled) "PEAKING ON" else "PEAKING OFF",
+                        selected = focusPeakingEnabled,
+                        onClick = onTogglePeaking
+                    )
+                }
             }
             Text(
-                text = if (focusDistance == null) "Continuous AF" else if (focusDistance < 0.15f) "Infinity ∞" else "Macro ${String.format("%.2f", focusDistance)}",
+                text = when {
+                    focusDistance == null -> "Continuous AF"
+                    focusDistance < 0.12f -> "Infinity ∞"
+                    else -> String.format(Locale.US, "Macro %.2f", focusDistance)
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = GalaxyAmber
             )
@@ -491,14 +653,15 @@ private fun WhiteBalanceRow(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "COLOR TEMPERATURE",
+                    text = "COLOR TEMPERATURE (2300K – 10000K)",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondaryZinc
                 )
                 Text(
                     text = "${customKelvin}K",
                     style = MaterialTheme.typography.labelMedium,
-                    color = GalaxyAmber
+                    color = GalaxyAmber,
+                    fontWeight = FontWeight.Bold
                 )
             }
             Slider(

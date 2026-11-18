@@ -8,10 +8,16 @@ enum class CameraMode(
     val description: String,
     val isDefaultCarousel: Boolean
 ) {
+    NIGHT(
+        label = "NIGHT",
+        badgeTitle = "4K Nightography",
+        description = "Multi-frame low-light shadow boost, high-ISO bilateral denoise & highlight guard",
+        isDefaultCarousel = true
+    ),
     PORTRAIT(
         label = "PORTRAIT",
         badgeTitle = "4K Studio Portrait",
-        description = "Adjustable f/1.4–f/16 optical-style background blur and subject isolation",
+        description = "Adjustable f/1.4–f/16 optical-style background blur, beauty & Harcourt lighting",
         isDefaultCarousel = true
     ),
     PHOTO(
@@ -23,19 +29,61 @@ enum class CameraMode(
     VIDEO(
         label = "VIDEO",
         badgeTitle = "4K Pro Video",
-        description = "4K UHD 3840×2160 recording up to 1000 Mbps in MP4, HEVC, RAW MOV & MKV",
+        description = "4K UHD 3840×2160 60fps recording up to 1000 Mbps in MP4, HEVC, RAW MOV & MKV",
         isDefaultCarousel = true
     ),
     PRO(
         label = "PRO",
         badgeTitle = "Manual Pro 4K",
-        description = "Full Camera2 manual control over ISO, Shutter, WB, Focus, RAW DNG, LUT & Log",
+        description = "Real-time manual M Metering, ISO 50–6400, Shutter 1/4000s–8s, EV, AF/MF Peaking, WB & RAW",
         isDefaultCarousel = true
     ),
-    NIGHT(
-        label = "NIGHT",
-        badgeTitle = "4K Nightography",
-        description = "Multi-frame low-light shadow boost and highlight preservation",
+    MULTI_VIDEO(
+        label = "MULTI-VIDEO",
+        badgeTitle = "Dual-View Multi-Video",
+        description = "Cinematic picture-in-picture & split-frame multi-perspective recording",
+        isDefaultCarousel = false
+    ),
+    SLOW_MO(
+        label = "SLOW-MO",
+        badgeTitle = "High-Framerate Slow-Mo",
+        description = "Smooth high-speed motion capture with temporal noise suppression",
+        isDefaultCarousel = false
+    ),
+    PANORAMA(
+        label = "PANORAMA",
+        badgeTitle = "4K Ultra-Wide Pano",
+        description = "Cinematic 21:9 / 2.35:1 wide-field panoramic horizon framing",
+        isDefaultCarousel = false
+    ),
+    TIME_LAPSE(
+        label = "TIME-LAPSE",
+        badgeTitle = "4K Hyper Time-Lapse",
+        description = "Accelerated time-lapse capture with stabilized exposure & white balance lock",
+        isDefaultCarousel = false
+    ),
+    UNDERWATER(
+        label = "UNDERWATER",
+        badgeTitle = "Underwater Mode",
+        description = "Aquatic red/amber color restoration, high contrast & Volume-Key shutter control",
+        isDefaultCarousel = false
+    ),
+    SUPER_MACRO(
+        label = "SUPER MACRO",
+        badgeTitle = "Super Macro Close-Up",
+        description = "Extreme close-focus magnification (4cm) with edge micro-contrast enhancement",
+        isDefaultCarousel = false
+    ),
+    HIGH_RES(
+        label = "HIGH-RES",
+        badgeTitle = "200MP Ultra High-Res",
+        description = "Full native sensor maximum-resolution uncompressed JPEG + 4x Super-Resolution",
+        isDefaultCarousel = false
+    ),
+    SCAN_DOCUMENT(
+        label = "SCAN DOCUMENT",
+        badgeTitle = "AI Document Scanner",
+        description = "High-contrast document de-shadowing, crisp text sharpening & perspective framing",
         isDefaultCarousel = false
     ),
     HDR(
@@ -48,12 +96,6 @@ enum class CameraMode(
         label = "BEAUTY",
         badgeTitle = "4K Studio Beauty",
         description = "Natural dermal smoothing, skin tone warmth, and clarity enhancement",
-        isDefaultCarousel = false
-    ),
-    PANORAMA(
-        label = "PANORAMA",
-        badgeTitle = "4K Ultra-Wide Pano",
-        description = "Cinematic 21:9 / 2.4:1 wide-field panoramic horizon framing",
         isDefaultCarousel = false
     )
 }
@@ -433,14 +475,25 @@ enum class WhiteBalancePreset(val label: String, val kelvin: Int) {
     MANUAL_KELVIN("Custom K", 5500)
 }
 
+enum class ProMeteringMode(val shortLabel: String, val fullTitle: String) {
+    MATRIX("Matrix", "Matrix Multi-Zone Metering"),
+    CENTER_WEIGHTED("Center", "Center-Weighted Metering"),
+    SPOT("Spot", "Spot Precision Metering")
+}
+
 data class ProCameraSettings(
+    val meteringMode: ProMeteringMode = ProMeteringMode.MATRIX,
     val iso: Int? = null,
     val shutterSpeedNs: Long? = null,
     val whiteBalance: WhiteBalancePreset = WhiteBalancePreset.AUTO,
     val customKelvin: Int = 5500,
     val manualFocusDistance: Float? = null,
+    val focusPeakingEnabled: Boolean = true,
     val exposureCompensationIndex: Int = 0
 ) {
+    val formattedMetering: String
+        get() = meteringMode.shortLabel
+
     val formattedIso: String
         get() = iso?.toString() ?: "AUTO"
 
@@ -456,23 +509,32 @@ data class ProCameraSettings(
 
     val formattedWb: String
         get() = if (whiteBalance == WhiteBalancePreset.AUTO) {
-            "AUTO"
+            "AWB"
         } else {
             "${if (whiteBalance == WhiteBalancePreset.MANUAL_KELVIN) customKelvin else whiteBalance.kelvin}K"
         }
 
     val formattedFocus: String
         get() = manualFocusDistance?.let {
-            if (it < 0.15f) "INF" else String.format("%.1f", it)
-        } ?: "AF"
+            if (it < 0.12f) "INF" else String.format(java.util.Locale.US, "MF %.1f", it)
+        } ?: "AF-C"
+
+    val hasAnyManualOverride: Boolean
+        get() = iso != null ||
+            shutterSpeedNs != null ||
+            whiteBalance != WhiteBalancePreset.AUTO ||
+            manualFocusDistance != null ||
+            exposureCompensationIndex != 0 ||
+            meteringMode != ProMeteringMode.MATRIX
 }
 
 enum class ProParameterTab(val title: String) {
     NONE("NONE"),
+    METERING("M"),
     ISO("ISO"),
-    SHUTTER("SPEED"),
+    SHUTTER("S"),
     EV("EV"),
-    FOCUS("FOCUS"),
+    FOCUS("AF"),
     WB("WB")
 }
 

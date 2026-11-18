@@ -43,6 +43,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.min
 
 private const val TAG = "MediaGalleryRepo"
@@ -221,10 +222,20 @@ class MediaGalleryRepository(private val context: Context) {
             // keep the unchanged original capture bitmap directly so zero painterly artifacts are introduced.
             val hasCreativeLut = creativeFiltersEnabled &&
                 (activeLut != PhotoFilterPreset.ORIGINAL || activeLogProfile != LogProfile.STANDARD_REC709)
+            val hasProManualOverride = mode == CameraMode.PRO && proSettings.hasAnyManualOverride
             val needsComputationalPass = hasCreativeLut ||
+                hasProManualOverride ||
                 aiSceneOptimizerEnabled ||
                 addWatermark ||
-                mode in listOf(CameraMode.NIGHT, CameraMode.HDR, CameraMode.PORTRAIT, CameraMode.BEAUTY)
+                mode in listOf(
+                    CameraMode.NIGHT,
+                    CameraMode.HDR,
+                    CameraMode.PORTRAIT,
+                    CameraMode.BEAUTY,
+                    CameraMode.UNDERWATER,
+                    CameraMode.SCAN_DOCUMENT,
+                    CameraMode.SUPER_MACRO
+                )
 
             val finalOriginalBitmap = if (needsComputationalPass) {
                 applyOptionalCreativeEffects(
@@ -641,6 +652,21 @@ class MediaGalleryRepository(private val context: Context) {
                 contrast *= 1.02f
                 saturation *= 1.02f
             }
+            CameraMode.UNDERWATER -> {
+                contrast *= 1.12f
+                saturation *= 1.18f
+                warmth += 18f
+                brightness += 4f
+            }
+            CameraMode.SCAN_DOCUMENT -> {
+                contrast *= 1.32f
+                saturation *= 0.90f
+                brightness += 12f
+            }
+            CameraMode.SUPER_MACRO -> {
+                contrast *= 1.08f
+                saturation *= 1.06f
+            }
             else -> Unit
         }
 
@@ -653,6 +679,11 @@ class MediaGalleryRepository(private val context: Context) {
             extraBrightness = brightness,
             extraWarmth = warmth
         )
+        if (mode == CameraMode.PRO && proSettings.hasAnyManualOverride) {
+            buildProManualColorMatrix(proSettings)?.let { proMatrix ->
+                matrix.postConcat(proMatrix)
+            }
+        }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(matrix)
         }
@@ -927,6 +958,62 @@ class MediaGalleryRepository(private val context: Context) {
             )
             cm.postConcat(gradeMatrix)
             return cm
+        }
+
+        /**
+         * Builds a real-time ColorMatrix representing manual Pro Mode settings (`ISO`, `Shutter Speed`,
+         * `EV`, `Metering`, and `White Balance Kelvin`) so both the live viewfinder (`PreviewView.setRenderEffect`)
+         * and the saved capture (`processAndSaveCapturedPhoto`) immediately reflect every manual adjustment.
+         */
+        fun buildProManualColorMatrix(
+            proSettings: ProCameraSettings,
+            exposureStepEv: Float = 0.25f
+        ): ColorMatrix? {
+            if (!proSettings.hasAnyManualOverride) return null
+
+            // 1. Compute manual exposure stops relative to baseline ISO 200 and 1/125s (8,000,000ns)
+            var totalEvStops = proSettings.exposureCompensationIndex * exposureStepEv
+            proSettings.iso?.let { manualIso ->
+                val isoStops = kotlin.math.ln(manualIso.toFloat() / 200f) / kotlin.math.ln(2f)
+                totalEvStops += (isoStops * 0.48f)
+            }
+            proSettings.shutterSpeedNs?.let { manualShutterNs ->
+                val shutterStops = kotlin.math.ln(manualShutterNs.toDouble() / 8_000_000.0).toFloat() / kotlin.math.ln(2f)
+                totalEvStops += (shutterStops * 0.42f)
+            }
+            when (proSettings.meteringMode) {
+                com.example.model.ProMeteringMode.SPOT -> totalEvStops += 0.12f
+                com.example.model.ProMeteringMode.CENTER_WEIGHTED -> totalEvStops += 0.05f
+                com.example.model.ProMeteringMode.MATRIX -> Unit
+            }
+
+            val clampedEv = totalEvStops.coerceIn(-2.8f, 2.8f)
+            val gain = 2.0.pow((clampedEv * 0.45f).toDouble()).toFloat().coerceIn(0.42f, 2.25f)
+            val brightnessShift = (clampedEv * 18f).coerceIn(-55f, 65f)
+
+            // 2. Compute White Balance Kelvin warmth shift relative to 5500K daylight neutral
+            val activeKelvin = when (proSettings.whiteBalance) {
+                com.example.model.WhiteBalancePreset.AUTO -> 5500
+                com.example.model.WhiteBalancePreset.MANUAL_KELVIN -> proSettings.customKelvin
+                else -> proSettings.whiteBalance.kelvin
+            }
+            // Higher Kelvin (e.g., 7500K..10000K) adds warm amber; lower Kelvin (e.g., 2800K..3500K) adds cool tungsten compensation
+            val kelvinDelta = (activeKelvin - 5500) / 100f // -32 to +45
+            val rWb = (1.0f + kelvinDelta * 0.0055f).coerceIn(0.75f, 1.32f)
+            val gWb = (1.0f + kelvinDelta * 0.0012f).coerceIn(0.90f, 1.12f)
+            val bWb = (1.0f - kelvinDelta * 0.0055f).coerceIn(0.75f, 1.32f)
+            val rOffset = brightnessShift + (kelvinDelta * 0.65f)
+            val gOffset = brightnessShift + (kelvinDelta * 0.15f)
+            val bOffset = brightnessShift - (kelvinDelta * 0.65f)
+
+            return ColorMatrix(
+                floatArrayOf(
+                    gain * rWb, 0f, 0f, 0f, rOffset,
+                    0f, gain * gWb, 0f, 0f, gOffset,
+                    0f, 0f, gain * bWb, 0f, bOffset,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
         }
     }
 }

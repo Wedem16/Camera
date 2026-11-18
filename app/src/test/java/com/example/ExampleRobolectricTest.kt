@@ -283,5 +283,32 @@ class ExampleRobolectricTest {
         ) {}
         assertEquals(32, result.bitmap.width)
         assertEquals(32, result.bitmap.height)
+
+        // Verify Honor Camera Settings toggles & Pro Mode color matrix
+        val viewModel = CameraViewModel(context as Application)
+        assertTrue(viewModel.uiState.value.levelEnabled)
+        assertFalse(viewModel.uiState.value.floatingShutterEnabled)
+        viewModel.toggleFloatingShutter()
+        assertTrue(viewModel.uiState.value.floatingShutterEnabled)
+        viewModel.toggleLevel()
+        assertFalse(viewModel.uiState.value.levelEnabled)
+
+        viewModel.updateProMeteringMode(com.example.model.ProMeteringMode.SPOT)
+        viewModel.updateProIso(1600)
+        viewModel.updateProShutter(33_333_333L)
+        viewModel.updateProWhiteBalance(WhiteBalancePreset.DAYLIGHT, 6500)
+        assertTrue(viewModel.uiState.value.proSettings.hasAnyManualOverride)
+
+        val proMatrix = com.example.data.MediaGalleryRepository.buildProManualColorMatrix(
+            proSettings = viewModel.uiState.value.proSettings,
+            exposureStepEv = 1.0f
+        )
+        // Brighter exposure + warm 6500K WB scales red channel > 1.0f
+        assertTrue(proMatrix!!.array[0] > 1.1f)
+
+        viewModel.restoreDefaultCameraSettings()
+        assertTrue(viewModel.uiState.value.levelEnabled)
+        assertFalse(viewModel.uiState.value.floatingShutterEnabled)
+        assertFalse(viewModel.uiState.value.proSettings.hasAnyManualOverride)
     }
 }

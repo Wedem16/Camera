@@ -678,13 +678,17 @@ class CameraHardwareController(private val context: Context) {
 
     /**
      * Configures Camera2 CaptureRequest options:
-     * - Keeps AWB, AE, and AF on automatic unless overridden in Pro Mode.
-     * - Sets NOISE_REDUCTION_MODE and EDGE_MODE to FAST so foliage, grass, and fine text are never
-     *   smeared into an oil-painting / watercolor texture.
+     * - In Pro Mode, when manual ISO or Shutter Speed is selected, explicitly sets
+     *   `CONTROL_AE_MODE_OFF` along with both `SENSOR_SENSITIVITY` and `SENSOR_EXPOSURE_TIME`
+     *   so the Camera2 HAL honors manual exposure instead of overriding it with auto-exposure.
+     * - Supports manual focus distance (`CONTROL_AF_MODE_OFF` + `LENS_FOCUS_DISTANCE`) and
+     *   white balance presets / Kelvin + optional AWB lock.
+     * - Sets NOISE_REDUCTION_MODE and EDGE_MODE appropriately so foliage stays natural and night grain is suppressed.
      */
     fun applyCamera2Parameters(
         proSettings: ProCameraSettings,
-        videoStabilizationEnabled: Boolean
+        videoStabilizationEnabled: Boolean,
+        lockWhiteBalance: Boolean = false
     ) {
         val camera = boundCamera ?: return
         try {
@@ -707,13 +711,14 @@ class CameraHardwareController(private val context: Context) {
                 }
             }
             optionsBuilder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+            optionsBuilder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, lockWhiteBalance)
 
             if (proSettings.manualFocusDistance != null) {
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AF_MODE,
                     CaptureRequest.CONTROL_AF_MODE_OFF
                 )
-                val maxDiopters = 10.0f
+                val maxDiopters = lastInspectedCapabilities.minFocusDistanceDiopters.coerceAtLeast(10.0f)
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.LENS_FOCUS_DISTANCE,
                     (proSettings.manualFocusDistance * maxDiopters).coerceIn(0f, maxDiopters)
@@ -721,17 +726,24 @@ class CameraHardwareController(private val context: Context) {
             } else {
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    if (lastBoundIsVideoOrNight) {
+                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                    } else {
+                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    }
                 )
             }
 
             if (proSettings.iso != null || proSettings.shutterSpeedNs != null) {
-                proSettings.iso?.let {
-                    optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, it)
-                }
-                proSettings.shutterSpeedNs?.let {
-                    optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, it)
-                }
+                // CRITICAL: Camera2 HAL ignores SENSOR_SENSITIVITY and SENSOR_EXPOSURE_TIME unless CONTROL_AE_MODE is OFF
+                optionsBuilder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE,
+                    CaptureRequest.CONTROL_AE_MODE_OFF
+                )
+                val effectiveIso = (proSettings.iso ?: 200).coerceIn(50, 6400)
+                val effectiveShutterNs = (proSettings.shutterSpeedNs ?: 16_666_666L).coerceIn(100_000L, 8_000_000_000L)
+                optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, effectiveIso)
+                optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, effectiveShutterNs)
             } else {
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_MODE,
@@ -759,7 +771,6 @@ class CameraHardwareController(private val context: Context) {
 
             // In Video mode, Night mode, or high manual ISO (>= 800), enable hardware temporal & spatial
             // noise reduction + hot-pixel/aberration suppression to eliminate high-ISO night grain at 60fps.
-            // In standard daylight photo modes, keep FAST noise reduction so foliage textures stay crisp.
             val useHighIsoDenoise = lastBoundIsVideoOrNight || (proSettings.iso != null && proSettings.iso >= 800)
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.NOISE_REDUCTION_MODE,
@@ -795,6 +806,7 @@ class CameraHardwareController(private val context: Context) {
 
     fun capturePhotoBitmap(
         isFrontLens: Boolean,
+        mirrorFrontCamera: Boolean = true,
         onBitmapCaptured: (Bitmap) -> Unit,
         onError: (String) -> Unit
     ) {
@@ -829,11 +841,12 @@ class CameraHardwareController(private val context: Context) {
                             image.toBitmap()
                         }
                         val rotation = image.imageInfo.rotationDegrees
+                        val shouldMirror = isFrontLens && mirrorFrontCamera
                         val matrix = Matrix().apply {
                             if (rotation != 0) postRotate(rotation.toFloat())
-                            if (isFrontLens) postScale(-1f, 1f)
+                            if (shouldMirror) postScale(-1f, 1f)
                         }
-                        val oriented = if (rotation != 0 || isFrontLens) {
+                        val oriented = if (rotation != 0 || shouldMirror) {
                             Bitmap.createBitmap(
                                 rawBitmap,
                                 0,

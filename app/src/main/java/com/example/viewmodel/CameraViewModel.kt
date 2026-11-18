@@ -69,11 +69,13 @@ data class CameraUiState(
     val hasAudioPermission: Boolean = false,
     val activeMode: CameraMode = CameraMode.PHOTO,
     val pinnedModes: List<CameraMode> = listOf(
+        CameraMode.NIGHT,
         CameraMode.PORTRAIT,
         CameraMode.PHOTO,
         CameraMode.VIDEO,
         CameraMode.PRO
     ),
+    val showQuickMenuPopup: Boolean = false,
     val showMoreModesSheet: Boolean = false,
     val showSettingsDialog: Boolean = false,
     val showAiCoachSheet: Boolean = false,
@@ -100,6 +102,21 @@ data class CameraUiState(
     val activeLogProfile: LogProfile = LogProfile.STANDARD_REC709,
     val videoStabilizationEnabled: Boolean = true,
     val gridLinesEnabled: Boolean = true,
+    val levelEnabled: Boolean = true,
+    val floatingShutterEnabled: Boolean = false,
+    val mirrorReflectionEnabled: Boolean = true,
+    val muteShutterAndAudio: Boolean = false,
+    val autoFpsLowLightEnabled: Boolean = false,
+    val lockWhiteBalanceInVideo: Boolean = false,
+    val efficientVideoFormatEnabled: Boolean = false,
+    val screenOffRecordingEnabled: Boolean = false,
+    val screenOffStandbyActive: Boolean = false,
+    val recommendFiltersEnabled: Boolean = true,
+    val keepOriginalWithAiEnhance: Boolean = true,
+    val autoLensSwitchingEnabled: Boolean = true,
+    val rememberSettingsEnabled: Boolean = true,
+    val locationTagEnabled: Boolean = true,
+    val defaultFocalLengthMm: Int = 24,
     val watermarkEnabled: Boolean = false,
     val volumeButtonShutterEnabled: Boolean = true,
     val aiSceneOptimizerEnabled: Boolean = false,
@@ -143,6 +160,14 @@ data class CameraUiState(
 ) {
     val activeZoomProfile: ZoomOptimizationProfile
         get() = ZoomOptimizationProfile.fromZoomRatio(currentZoomRatio)
+
+    val isVideoStreamMode: Boolean
+        get() = activeMode in listOf(
+            CameraMode.VIDEO,
+            CameraMode.MULTI_VIDEO,
+            CameraMode.SLOW_MO,
+            CameraMode.TIME_LAPSE
+        )
 }
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
@@ -242,7 +267,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         hardwareController.bindCamera(
             lifecycleOwner = lifecycleOwner,
             previewView = previewView,
-            isVideoMode = state.activeMode == CameraMode.VIDEO,
+            isVideoMode = state.isVideoStreamMode,
             activeMode = state.activeMode,
             lensFacing = state.lensFacing,
             flashSetting = state.flashSetting,
@@ -281,7 +306,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 activeMode = mode,
-                showMoreModesSheet = false
+                photoResolution = if (mode == CameraMode.HIGH_RES) {
+                    PhotoResolutionSetting.ULTRA_HD_200MP
+                } else {
+                    it.photoResolution
+                },
+                showMoreModesSheet = false,
+                showQuickMenuPopup = false
             )
         }
         if (mode == CameraMode.PRO) {
@@ -305,20 +336,28 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun toggleQuickMenuPopup() {
+        _uiState.update { it.copy(showQuickMenuPopup = !it.showQuickMenuPopup) }
+    }
+
+    fun setShowQuickMenuPopup(visible: Boolean) {
+        _uiState.update { it.copy(showQuickMenuPopup = visible) }
+    }
+
     fun setShowMoreModesSheet(visible: Boolean) {
-        _uiState.update { it.copy(showMoreModesSheet = visible) }
+        _uiState.update { it.copy(showMoreModesSheet = visible, showQuickMenuPopup = false) }
     }
 
     fun setShowSettingsDialog(visible: Boolean) {
-        _uiState.update { it.copy(showSettingsDialog = visible) }
+        _uiState.update { it.copy(showSettingsDialog = visible, showQuickMenuPopup = false) }
     }
 
     fun setShowLutLogSheet(visible: Boolean) {
-        _uiState.update { it.copy(showLutLogSheet = visible) }
+        _uiState.update { it.copy(showLutLogSheet = visible, showQuickMenuPopup = false) }
     }
 
     fun setShowBitrateSheet(visible: Boolean) {
-        _uiState.update { it.copy(showBitrateSheet = visible) }
+        _uiState.update { it.copy(showBitrateSheet = visible, showQuickMenuPopup = false) }
     }
 
     // Step 3: Creative LUT & Log Controls (Gated behind Settings toggle, default OFF / neutral color)
@@ -386,7 +425,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val entries = VideoFormatSetting.entries
         val currentIdx = entries.indexOf(_uiState.value.videoFormat).coerceAtLeast(0)
         val next = entries[(currentIdx + 1) % entries.size]
-        _uiState.update { it.copy(videoFormat = next) }
+        _uiState.update {
+            it.copy(
+                videoFormat = next,
+                efficientVideoFormatEnabled = next == VideoFormatSetting.MP4_HEVC
+            )
+        }
         appendDiagnosticLog("VID-FMT", "Video Container Format -> ${next.fullTitle} (.${next.extension})")
         showStatusBanner("Video Format: ${next.fullTitle}")
     }
@@ -465,7 +509,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val clamped = mbps.coerceIn(10, 1000)
         _uiState.update { it.copy(videoBitrateMbps = clamped) }
         appendDiagnosticLog("BITRATE", "Target Video Bitrate set to $clamped Mbps (${clamped * 1000} kbps)")
-        if (lifecycleOwner != null && previewView != null && _uiState.value.activeMode == CameraMode.VIDEO && !_uiState.value.isRecordingVideo) {
+        if (lifecycleOwner != null && previewView != null && _uiState.value.isVideoStreamMode && !_uiState.value.isRecordingVideo) {
             bindCameraToLifecycle(lifecycleOwner, previewView)
         }
     }
@@ -624,7 +668,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleVideoStabilization() {
         val next = !_uiState.value.videoStabilizationEnabled
         _uiState.update { it.copy(videoStabilizationEnabled = next) }
-        hardwareController.applyCamera2Parameters(_uiState.value.proSettings, next)
+        hardwareController.applyCamera2Parameters(
+            _uiState.value.proSettings,
+            next,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
         appendDiagnosticLog("OIS/EIS", "Optical Image Stabilization (OIS) + EIS -> $next")
         showStatusBanner(if (next) "OIS + Video Stabilization ON" else "OIS / Video Stabilization OFF")
     }
@@ -636,17 +684,153 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleGridLines() {
-        _uiState.update { it.copy(gridLinesEnabled = !it.gridLinesEnabled) }
+        val next = !_uiState.value.gridLinesEnabled
+        _uiState.update { it.copy(gridLinesEnabled = next) }
+        showStatusBanner(if (next) "Gridlines ON" else "Gridlines OFF")
+    }
+
+    fun toggleLevel() {
+        val next = !_uiState.value.levelEnabled
+        _uiState.update { it.copy(levelEnabled = next) }
+        showStatusBanner(if (next) "Horizon Level ON" else "Horizon Level OFF")
+    }
+
+    fun toggleFloatingShutter() {
+        val next = !_uiState.value.floatingShutterEnabled
+        _uiState.update { it.copy(floatingShutterEnabled = next) }
+        showStatusBanner(if (next) "Floating Shutter ON (Drag anywhere on viewfinder)" else "Floating Shutter OFF")
+    }
+
+    fun toggleMirrorReflection() {
+        val next = !_uiState.value.mirrorReflectionEnabled
+        _uiState.update { it.copy(mirrorReflectionEnabled = next) }
+        showStatusBanner(if (next) "Front Camera Mirror Reflection ON" else "Front Camera Mirror Reflection OFF")
+    }
+
+    fun toggleMute() {
+        val next = !_uiState.value.muteShutterAndAudio
+        _uiState.update { it.copy(muteShutterAndAudio = next) }
+        showStatusBanner(if (next) "Mute ON (Silent Shutter & Audio)" else "Mute OFF (Audio Enabled)")
+    }
+
+    fun toggleAutoFpsLowLight() {
+        val next = !_uiState.value.autoFpsLowLightEnabled
+        _uiState.update { it.copy(autoFpsLowLightEnabled = next) }
+        showStatusBanner(
+            if (next) "Auto Low-Light FPS ON"
+            else "Strict 60fps Lock Active (High-ISO Denoise)"
+        )
+    }
+
+    fun toggleLockWhiteBalanceInVideo() {
+        val next = !_uiState.value.lockWhiteBalanceInVideo
+        _uiState.update { it.copy(lockWhiteBalanceInVideo = next) }
+        hardwareController.applyCamera2Parameters(
+            _uiState.value.proSettings,
+            _uiState.value.videoStabilizationEnabled,
+            next
+        )
+        showStatusBanner(if (next) "Video White Balance Locked" else "Video Auto White Balance Active")
+    }
+
+    fun toggleEfficientVideoFormat() {
+        val next = !_uiState.value.efficientVideoFormatEnabled
+        val format = if (next) VideoFormatSetting.MP4_HEVC else VideoFormatSetting.MP4_AVC
+        _uiState.update {
+            it.copy(
+                efficientVideoFormatEnabled = next,
+                videoFormat = format
+            )
+        }
+        showStatusBanner(if (next) "Efficient Video Format ON (HEVC H.265)" else "Standard Video Format (H.264 MP4)")
+    }
+
+    fun toggleScreenOffRecording() {
+        val next = !_uiState.value.screenOffRecordingEnabled
+        _uiState.update { it.copy(screenOffRecordingEnabled = next, screenOffStandbyActive = false) }
+        showStatusBanner(if (next) "Screen-Off Recording Enabled" else "Screen-Off Recording OFF")
+    }
+
+    fun toggleScreenOffStandby() {
+        if (!_uiState.value.isRecordingVideo) return
+        val next = !_uiState.value.screenOffStandbyActive
+        _uiState.update { it.copy(screenOffStandbyActive = next) }
+    }
+
+    fun toggleRecommendFilters() {
+        val next = !_uiState.value.recommendFiltersEnabled
+        _uiState.update { it.copy(recommendFiltersEnabled = next) }
+        showStatusBanner(if (next) "Recommend Filters ON" else "Recommend Filters OFF")
+    }
+
+    fun toggleKeepOriginalWithAiEnhance() {
+        val next = !_uiState.value.keepOriginalWithAiEnhance
+        _uiState.update { it.copy(keepOriginalWithAiEnhance = next) }
+        showStatusBanner(if (next) "Keep Original Photo with AI Enhance: ON" else "Keep Original Photo: Always Saved")
+    }
+
+    fun toggleAutoLensSwitching() {
+        val next = !_uiState.value.autoLensSwitchingEnabled
+        _uiState.update { it.copy(autoLensSwitchingEnabled = next) }
+        showStatusBanner(if (next) "Auto Lens Switching ON" else "Manual Optical Lens Selection")
+    }
+
+    fun toggleRememberSettings() {
+        val next = !_uiState.value.rememberSettingsEnabled
+        _uiState.update { it.copy(rememberSettingsEnabled = next) }
+        showStatusBanner(if (next) "Remember Camera Settings ON" else "Remember Camera Settings OFF")
+    }
+
+    fun toggleLocationTag() {
+        val next = !_uiState.value.locationTagEnabled
+        _uiState.update { it.copy(locationTagEnabled = next) }
+        showStatusBanner(if (next) "Location Tag ON" else "Location Tag OFF")
+    }
+
+    fun cycleDefaultFocalLength() {
+        val nextMm = when (_uiState.value.defaultFocalLengthMm) {
+            24 -> 35
+            35 -> 50
+            else -> 24
+        }
+        val targetZoom = when (nextMm) {
+            35 -> 1.5f
+            50 -> 2.0f
+            else -> 1.0f
+        }
+        _uiState.update { it.copy(defaultFocalLengthMm = nextMm) }
+        setZoomRatio(targetZoom)
+        showStatusBanner("Default Focal Length: ${nextMm}mm (${targetZoom}x)")
+    }
+
+    fun restoreDefaultCameraSettings() {
+        val currentPermCam = _uiState.value.hasCameraPermission
+        val currentPermAudio = _uiState.value.hasAudioPermission
+        val currentMedia = _uiState.value.mediaList
+        val currentCaps = _uiState.value.hardwareCapabilities
+        _uiState.value = CameraUiState(
+            hasCameraPermission = currentPermCam,
+            hasAudioPermission = currentPermAudio,
+            mediaList = currentMedia,
+            selectedMediaItem = currentMedia.firstOrNull(),
+            hardwareCapabilities = currentCaps
+        )
+        hardwareController.applyCamera2Parameters(ProCameraSettings(), true, false)
+        hardwareController.setZoomRatio(1.0f)
+        appendDiagnosticLog("RESET", "Restored Honor 600 Cam default settings")
+        showStatusBanner("Restored default Honor 600 Cam settings")
     }
 
     fun toggleWatermark() {
         val next = !_uiState.value.watermarkEnabled
         _uiState.update { it.copy(watermarkEnabled = next) }
-        showStatusBanner(if (next) "Timestamp Watermark Enabled" else "Watermark OFF (Clean Image)")
+        showStatusBanner(if (next) "Honor Watermark Enabled" else "Watermark OFF (Clean Image)")
     }
 
     fun toggleVolumeButtonShutter() {
-        _uiState.update { it.copy(volumeButtonShutterEnabled = !it.volumeButtonShutterEnabled) }
+        val next = !_uiState.value.volumeButtonShutterEnabled
+        _uiState.update { it.copy(volumeButtonShutterEnabled = next) }
+        showStatusBanner(if (next) "Smart Capture Volume Shutter ON" else "Volume Shutter OFF")
     }
 
     fun setZoomRatio(ratio: Float) {
@@ -686,7 +870,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 "ZOOM",
                 "${profile.badgeLabel} -> $lensRoutingNote"
             )
-            if (effective in listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)) {
+            if (effective in listOf(0.6f, 1.0f, 1.5f, 2.0f, 3.0f, 5.0f, 10.0f)) {
                 showStatusBanner("${profile.badgeLabel}: $lensRoutingNote")
             }
         }
@@ -697,7 +881,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 focusPoint = Offset(x, y),
-                touchExposureEv = it.proSettings.exposureCompensationIndex * it.hardwareCapabilities.exposureStepEv
+                touchExposureEv = it.proSettings.exposureCompensationIndex * it.hardwareCapabilities.exposureStepEv,
+                showQuickMenuPopup = false
             )
         }
         appendDiagnosticLog("AF/AE", "Tap-to-focus locked at (${x.toInt()}, ${y.toInt()})")
@@ -741,18 +926,40 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun updateProMeteringMode(mode: com.example.model.ProMeteringMode) {
+        val next = _uiState.value.proSettings.copy(meteringMode = mode)
+        _uiState.update { it.copy(proSettings = next) }
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
+        appendDiagnosticLog("PRO-METER", "Metering Mode -> ${mode.fullTitle}")
+        showStatusBanner("Pro Metering: ${mode.fullTitle}")
+    }
+
     fun updateProIso(iso: Int?) {
         val next = _uiState.value.proSettings.copy(iso = iso)
         _uiState.update { it.copy(proSettings = next) }
-        hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
-        appendDiagnosticLog("PRO-ISO", "ISO -> ${next.formattedIso}")
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
+        appendDiagnosticLog("PRO-ISO", "ISO -> ${next.formattedIso} (AE_MODE=${if (next.iso != null || next.shutterSpeedNs != null) "OFF" else "AUTO"})")
+        refreshSceneMetricsOnDemand()
     }
 
     fun updateProShutter(shutterNs: Long?) {
         val next = _uiState.value.proSettings.copy(shutterSpeedNs = shutterNs)
         _uiState.update { it.copy(proSettings = next) }
-        hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
         appendDiagnosticLog("PRO-SHUTTER", "Shutter Speed -> ${next.formattedShutter}")
+        refreshSceneMetricsOnDemand()
     }
 
     fun updateProWhiteBalance(preset: WhiteBalancePreset, customKelvin: Int = _uiState.value.proSettings.customKelvin) {
@@ -761,15 +968,32 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             customKelvin = customKelvin.coerceIn(2300, 10000)
         )
         _uiState.update { it.copy(proSettings = next) }
-        hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
         appendDiagnosticLog("PRO-WB", "White Balance -> ${next.formattedWb}")
+        refreshSceneMetricsOnDemand()
     }
 
     fun updateProManualFocus(focusDist: Float?) {
         val next = _uiState.value.proSettings.copy(manualFocusDistance = focusDist)
         _uiState.update { it.copy(proSettings = next) }
-        hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
         appendDiagnosticLog("PRO-FOCUS", "Focus -> ${next.formattedFocus}")
+    }
+
+    fun toggleProFocusPeaking() {
+        val next = _uiState.value.proSettings.copy(
+            focusPeakingEnabled = !_uiState.value.proSettings.focusPeakingEnabled
+        )
+        _uiState.update { it.copy(proSettings = next) }
+        showStatusBanner(if (next.focusPeakingEnabled) "Focus Peaking Highlight ON" else "Focus Peaking OFF")
     }
 
     fun updateProExposureIndex(index: Int) {
@@ -777,22 +1001,32 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val clamped = index.coerceIn(caps.minExposureIndex, caps.maxExposureIndex)
         val next = _uiState.value.proSettings.copy(exposureCompensationIndex = clamped)
         _uiState.update { it.copy(proSettings = next) }
-        hardwareController.applyCamera2Parameters(next, _uiState.value.videoStabilizationEnabled)
-        appendDiagnosticLog("PRO-EV", "Exposure Index -> $clamped")
+        hardwareController.applyCamera2Parameters(
+            next,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
+        appendDiagnosticLog("PRO-EV", "Exposure Index -> $clamped (${String.format(Locale.US, "%+.1f EV", clamped * caps.exposureStepEv)})")
+        refreshSceneMetricsOnDemand()
     }
 
     fun resetProSettings() {
         val reset = ProCameraSettings()
         _uiState.update { it.copy(proSettings = reset) }
-        hardwareController.applyCamera2Parameters(reset, _uiState.value.videoStabilizationEnabled)
+        hardwareController.applyCamera2Parameters(
+            reset,
+            _uiState.value.videoStabilizationEnabled,
+            _uiState.value.lockWhiteBalanceInVideo
+        )
         appendDiagnosticLog("PRO", "Reset all Pro Camera2 parameters to AUTO")
         showStatusBanner("Pro settings reset to Auto")
+        refreshSceneMetricsOnDemand()
     }
 
     // Shutter & Recording Triggers
     fun onPrimaryShutterPressed() {
         val state = _uiState.value
-        if (state.activeMode == CameraMode.VIDEO) {
+        if (state.isVideoStreamMode) {
             toggleVideoRecording()
         } else {
             triggerPhotoCaptureWithTimer()
@@ -860,6 +1094,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val isFront = state.lensFacing == CameraSelector.LENS_FACING_FRONT
         hardwareController.capturePhotoBitmap(
             isFrontLens = isFront,
+            mirrorFrontCamera = state.mirrorReflectionEnabled,
             onBitmapCaptured = { capturedBitmap ->
                 viewModelScope.launch {
                     val savedCapture = galleryRepository.processAndSaveCapturedPhoto(
@@ -1033,7 +1268,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             hardwareController.stopVideoRecording()
         } else {
             hardwareController.startVideoRecording(
-                enableAudio = state.hasAudioPermission,
+                enableAudio = state.hasAudioPermission && !state.muteShutterAndAudio,
                 videoBitrateMbps = state.videoBitrateMbps,
                 videoResolution = state.videoResolution,
                 videoFormat = state.videoFormat,
@@ -1055,6 +1290,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                                 it.copy(
                                     isRecordingVideo = false,
                                     isVideoPaused = false,
+                                    screenOffStandbyActive = false,
                                     recordingDurationMs = 0L,
                                     recordingBytes = 0L
                                 )
@@ -1069,6 +1305,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                                 it.copy(
                                     isRecordingVideo = false,
                                     isVideoPaused = false,
+                                    screenOffStandbyActive = false,
                                     recordingDurationMs = 0L,
                                     recordingBytes = 0L
                                 )
