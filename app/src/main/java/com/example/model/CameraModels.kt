@@ -16,8 +16,8 @@ enum class CameraMode(
     ),
     PHOTO(
         label = "PHOTO",
-        badgeTitle = "4K Galaxy Photo",
-        description = "True 4K Ultra HD capture with AI Zoom Super-Resolution & Film/Travel LUTs",
+        badgeTitle = "Honor 600 4K Photo",
+        description = "True 4K Ultra HD capture with On-Device Smart HDR, Bilateral Denoise & Super-Resolution",
         isDefaultCarousel = true
     ),
     VIDEO(

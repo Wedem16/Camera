@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Galaxy HD Camera"
+rootProject.name = "Honor 600 Cam"
 
 include(":app")

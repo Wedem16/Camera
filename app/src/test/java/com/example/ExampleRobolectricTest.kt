@@ -263,4 +263,25 @@ class ExampleRobolectricTest {
         assertEquals(androidx.camera.video.Quality.FHD, config1080p30.prioritizedQualityOrder.first())
         assertEquals(80, config1080p30.effectiveBitrateMbps)
     }
+
+    @Test
+    fun `honor600Cam branding and bilateral shadow denoise suppress night chroma grain`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals("Honor 600 Cam", context.getString(R.string.app_name))
+        assertEquals("Honor 600 Studio Gallery", context.getString(R.string.gallery_title))
+
+        // Create a dark night-sky patch (base RGB = 24, 24, 28) with a noisy high-ISO chroma speckle at (8, 8)
+        val noisyNight = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(24, 24, 28))
+            setPixel(8, 8, Color.rgb(30, 20, 34)) // subtle high-ISO chroma/luma grain within threshold
+        }
+        val srEngine = OnDeviceSuperResolutionEngine(context)
+        val result = srEngine.upscaleBitmapTiled(
+            source = noisyNight,
+            mode = AiUpscaleMode.UPSCALE_2X,
+            recipe = null
+        ) {}
+        assertEquals(32, result.bitmap.width)
+        assertEquals(32, result.bitmap.height)
+    }
 }

@@ -168,28 +168,30 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     init {
         appendDiagnosticLog(
             "INIT",
-            "Device=${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) | 4K High-Res Stream Pipeline"
+            "Honor 600 Cam | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} | Zero-Lag 60fps 4K Pipeline"
         )
         refreshGallery()
     }
 
-    private fun startViewfinderSceneSampler() {
+    /**
+     * Samples a single viewfinder frame on-demand (e.g., when switching to PRO mode or opening AI Coach)
+     * rather than polling `PreviewView.getBitmap()` in a background loop, ensuring zero GPU readback stalls
+     * and a locked 60fps viewfinder.
+     */
+    fun refreshSceneMetricsOnDemand() {
         sceneSamplerJob?.cancel()
         sceneSamplerJob = viewModelScope.launch {
-            while (true) {
-                delay(1200L)
-                val current = _uiState.value
-                if (current.activeScreen == ActiveAppScreen.CAMERA_VIEWFINDER &&
-                    current.hasCameraPermission &&
-                    !current.isCapturingPhoto
-                ) {
-                    val bmp = hardwareController.grabViewfinderBitmap()
-                    if (bmp != null) {
-                        val metrics = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                            aiRepository.computeSceneMetricsFromBitmap(bmp)
-                        }
-                        _uiState.update { it.copy(sceneMetrics = metrics) }
+            val current = _uiState.value
+            if (current.activeScreen == ActiveAppScreen.CAMERA_VIEWFINDER &&
+                current.hasCameraPermission &&
+                !current.isCapturingPhoto
+            ) {
+                val bmp = hardwareController.grabViewfinderBitmap()
+                if (bmp != null) {
+                    val metrics = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                        aiRepository.computeSceneMetricsFromBitmap(bmp)
                     }
+                    _uiState.update { it.copy(sceneMetrics = metrics) }
                 }
             }
         }
@@ -258,7 +260,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { current ->
                     current.copy(extraHybridZoomFactor = extraScale)
                 }
-                startViewfinderSceneSampler()
+                if (_uiState.value.activeMode == CameraMode.PRO) {
+                    refreshSceneMetricsOnDemand()
+                }
             },
             onDiagnosticLog = { tag, msg ->
                 appendDiagnosticLog(tag, msg)
@@ -279,6 +283,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 activeMode = mode,
                 showMoreModesSheet = false
             )
+        }
+        if (mode == CameraMode.PRO) {
+            refreshSceneMetricsOnDemand()
         }
         appendDiagnosticLog("MODE", "Switched to ${mode.badgeTitle} (${mode.name})")
         showStatusBanner("${mode.badgeTitle}: ${mode.description}")
@@ -643,7 +650,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setZoomRatio(ratio: Float) {
+        setZoomRatio(ratio, isContinuousGesture = false)
+    }
+
+    fun setZoomRatio(ratio: Float, isContinuousGesture: Boolean) {
         val effective = ratio.coerceIn(0.6f, 10.0f)
+        if (isContinuousGesture && kotlin.math.abs(effective - _uiState.value.currentZoomRatio) < 0.015f) {
+            return
+        }
         val extraScale = hardwareController.setZoomRatio(effective)
         val caps = _uiState.value.hardwareCapabilities
         val profile = ZoomOptimizationProfile.fromZoomRatio(effective)
@@ -654,25 +668,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
-        val lensRoutingNote = when {
-            effective > 2.0f && caps.telephotoPhysicalCameraId != null ->
-                "Physical Telephoto Lens (ID ${caps.telephotoPhysicalCameraId})"
-            effective > 2.0f ->
-                "Optical/HAL Zoom (${String.format(Locale.US, "%.1fx", effective.coerceIn(caps.sensorMinZoomRatio, caps.sensorMaxZoomRatio))}, no center-crop upscale)"
-            effective < 1.0f && caps.supportsUltraWideOptical ->
-                "Physical Ultra-Wide Lens"
-            effective < 1.0f ->
-                "1.0x Wide Native (0.6x physical UW not exposed to third-party apps)"
-            else ->
-                "Main Wide Native Sensor"
-        }
+        if (!isContinuousGesture) {
+            val lensRoutingNote = when {
+                effective > 2.0f && caps.telephotoPhysicalCameraId != null ->
+                    "Physical Telephoto Lens (ID ${caps.telephotoPhysicalCameraId})"
+                effective > 2.0f ->
+                    "Optical/HAL Zoom (${String.format(Locale.US, "%.1fx", effective.coerceIn(caps.sensorMinZoomRatio, caps.sensorMaxZoomRatio))}, no center-crop upscale)"
+                effective < 1.0f && caps.supportsUltraWideOptical ->
+                    "Physical Ultra-Wide Lens"
+                effective < 1.0f ->
+                    "1.0x Wide Native (0.6x physical UW not exposed to third-party apps)"
+                else ->
+                    "Main Wide Native Sensor"
+            }
 
-        appendDiagnosticLog(
-            "ZOOM",
-            "${profile.badgeLabel} -> $lensRoutingNote"
-        )
-        if (effective in listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)) {
-            showStatusBanner("${profile.badgeLabel}: $lensRoutingNote")
+            appendDiagnosticLog(
+                "ZOOM",
+                "${profile.badgeLabel} -> $lensRoutingNote"
+            )
+            if (effective in listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)) {
+                showStatusBanner("${profile.badgeLabel}: $lensRoutingNote")
+            }
         }
     }
 
@@ -878,130 +894,72 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
                         val upscaleMode = state.aiUpscaleMode
                         if (state.aiAutoEditAfterCaptureEnabled) {
+                            // Fast On-Device Smart HDR + Bilateral High-ISO Denoise + Tiled Super-Resolution (Zero Cloud Delay)
                             val targetFactor = if (upscaleMode == AiUpscaleMode.UPSCALE_4X) 4 else 2
-                            val activePreset = state.selectedHonorAiPreset
+                            val effectiveUpscaleMode = if (targetFactor == 4) {
+                                AiUpscaleMode.UPSCALE_4X
+                            } else {
+                                AiUpscaleMode.UPSCALE_2X
+                            }
                             _uiState.update {
                                 it.copy(
                                     isUpscalingInProgress = true,
-                                    upscaleProgressPercent = 8,
-                                    upscaleStatusStage = "Honor 600 AI Generating (${activePreset.badge})...",
-                                    honorAiGenUiState = HonorAiGenUiState.Loading(
-                                        "Synthesizing ${activePreset.title} with Gemini AI (30–60s)..."
-                                    )
+                                    upscaleProgressPercent = 12,
+                                    upscaleStatusStage = "Honor 600 On-Device Smart HDR + ${targetFactor}x Denoise SR..."
                                 )
                             }
                             showStatusBanner(
-                                "Saved Original (${origW}×${origH}). Running ${activePreset.title}..."
-                            )
-                            appendDiagnosticLog(
-                                "HONOR-AI",
-                                "Starting ${activePreset.title} (gemini-nano-banana-2.1) + ${targetFactor}x Super-Res..."
+                                "Saved Original (${origW}×${origH}). Running Fast On-Device HDR + ${targetFactor}x Super-Res..."
                             )
 
-                            // Step A: Try Honor 600 Generative AI Image Reconstruction (`gemini-nano-banana-2.1`)
-                            var generatedSuccess = false
-                            try {
-                                val generatedBitmap = aiRepository.generateHonorAiReconstructedImage(
-                                    sourceBitmap = savedCapture.originalBitmap,
-                                    preset = activePreset,
-                                    customInstruction = state.customHonorAiPrompt
-                                )
-                                _uiState.update {
-                                    it.copy(
-                                        upscaleProgressPercent = 65,
-                                        upscaleStatusStage = "${activePreset.title} • Super-Res Upscaling..."
-                                    )
-                                }
-                                val (genUri, finalGenBitmap) = galleryRepository.saveHonorAiGeneratedPhoto(
-                                    generatedBitmap = generatedBitmap,
-                                    baseTimestamp = savedCapture.baseTimestamp,
-                                    presetBadge = activePreset.badge,
-                                    upscaleMode = if (targetFactor == 4) AiUpscaleMode.UPSCALE_4X else AiUpscaleMode.UPSCALE_2X,
-                                    zoomRatio = state.currentZoomRatio,
-                                    srEngine = srEngine,
-                                    onProgress = { pct ->
-                                        _uiState.update {
-                                            it.copy(upscaleProgressPercent = (65 + (pct * 0.35f).toInt()).coerceIn(65, 100))
-                                        }
-                                    }
-                                )
-                                if (genUri != null) {
-                                    generatedSuccess = true
-                                    val updatedItems = galleryRepository.loadCapturedMedia()
-                                    _uiState.update {
-                                        it.copy(
-                                            isUpscalingInProgress = false,
-                                            upscaleProgressPercent = 0,
-                                            upscaleStatusStage = "",
-                                            mediaList = updatedItems,
-                                            selectedMediaItem = updatedItems.firstOrNull(),
-                                            honorAiGenUiState = HonorAiGenUiState.Success(
-                                                bitmap = finalGenBitmap,
-                                                savedUri = genUri,
-                                                presetTitle = activePreset.title
-                                            )
-                                        )
-                                    }
-                                    appendDiagnosticLog(
-                                        "HONOR-AI",
-                                        "Saved Honor 600 AI Generated photo (${finalGenBitmap.width}×${finalGenBitmap.height}) -> $genUri"
-                                    )
-                                    showStatusBanner(
-                                        "Saved Original + ${activePreset.title} (${finalGenBitmap.width}×${finalGenBitmap.height})"
-                                    )
-                                }
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                val errMsg = e.localizedMessage ?: "Honor 600 AI Generation failed."
-                                appendDiagnosticLog("HONOR-AI-ERR", errMsg)
-                                _uiState.update {
-                                    it.copy(honorAiGenUiState = HonorAiGenUiState.Error(errMsg))
-                                }
-                            }
-
-                            // Step B: If cloud generative image synthesis failed (e.g. offline or quota),
-                            // still run the AI Color Mastering + 2x/4x Tiled Super-Resolution pass
-                            if (!generatedSuccess) {
-                                val recipe = aiRepository.generateAiAutoEditRecipe(
-                                    capturedBitmap = savedCapture.originalBitmap,
+                            val recipe = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                                val metrics = aiRepository.computeSceneMetricsFromBitmap(savedCapture.originalBitmap)
+                                _uiState.update { it.copy(sceneMetrics = metrics) }
+                                aiRepository.computeOnDeviceHistogramAutoEditRecipe(
+                                    bitmap = savedCapture.originalBitmap,
                                     upscaleFactor = targetFactor
                                 )
-                                _uiState.update {
-                                    it.copy(
-                                        lastAiAutoEditRecipe = recipe,
-                                        upscaleProgressPercent = 20,
-                                        upscaleStatusStage = "${recipe.styleTitle} • Upscaling ${targetFactor}x..."
-                                    )
-                                }
-                                val (editedUri, srResult) = galleryRepository.saveAiAutoEditedAndUpscaledPhoto(
-                                    originalBitmap = savedCapture.originalBitmap,
-                                    baseTimestamp = savedCapture.baseTimestamp,
-                                    recipe = recipe,
-                                    upscaleMode = if (targetFactor == 4) AiUpscaleMode.UPSCALE_4X else AiUpscaleMode.UPSCALE_2X,
-                                    zoomRatio = state.currentZoomRatio,
-                                    srEngine = srEngine,
-                                    onProgress = { pct ->
-                                        _uiState.update {
-                                            it.copy(upscaleProgressPercent = (20 + (pct * 0.80f).toInt()).coerceIn(20, 100))
-                                        }
-                                    }
+                            }
+
+                            _uiState.update {
+                                it.copy(
+                                    lastAiAutoEditRecipe = recipe,
+                                    upscaleProgressPercent = 25,
+                                    upscaleStatusStage = "${recipe.styleTitle} • ${targetFactor}x Denoise & SR..."
                                 )
+                            }
 
-                                _uiState.update {
-                                    it.copy(
-                                        isUpscalingInProgress = false,
-                                        upscaleProgressPercent = 0,
-                                        upscaleStatusStage = ""
-                                    )
+                            val (editedUri, srResult) = galleryRepository.saveAiAutoEditedAndUpscaledPhoto(
+                                originalBitmap = savedCapture.originalBitmap,
+                                baseTimestamp = savedCapture.baseTimestamp,
+                                recipe = recipe,
+                                upscaleMode = effectiveUpscaleMode,
+                                zoomRatio = state.currentZoomRatio,
+                                srEngine = srEngine,
+                                onProgress = { pct ->
+                                    _uiState.update {
+                                        it.copy(upscaleProgressPercent = (25 + (pct * 0.75f).toInt()).coerceIn(25, 100))
+                                    }
                                 }
+                            )
 
-                                if (editedUri != null && srResult != null) {
-                                    refreshGallery()
-                                    showStatusBanner(
-                                        "Saved Original + ${recipe.styleTitle} (${srResult.bitmap.width}×${srResult.bitmap.height})"
-                                    )
-                                }
+                            _uiState.update {
+                                it.copy(
+                                    isUpscalingInProgress = false,
+                                    upscaleProgressPercent = 0,
+                                    upscaleStatusStage = ""
+                                )
+                            }
+
+                            if (editedUri != null && srResult != null) {
+                                appendDiagnosticLog(
+                                    "HONOR-HDR-SR",
+                                    "Saved ${recipe.styleTitle} (${srResult.bitmap.width}×${srResult.bitmap.height}) in ${srResult.elapsedMs}ms"
+                                )
+                                refreshGallery()
+                                showStatusBanner(
+                                    "Saved Original + ${recipe.styleTitle} (${srResult.bitmap.width}×${srResult.bitmap.height})"
+                                )
                             }
                         } else if (upscaleMode != AiUpscaleMode.ORIGINAL) {
                             _uiState.update {

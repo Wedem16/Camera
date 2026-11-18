@@ -1,10 +1,10 @@
 <resources>
-    <string name="app_name">Galaxy HD Camera</string>
-    <string name="permission_title">Galaxy Flagship Camera Experience</string>
-    <string name="permission_subtitle">Grant Camera and Microphone access to unlock Ultra HD photography, 4K/60fps video, manual Pro Camera2 telemetry, and hybrid AI Scene Optimization.</string>
+    <string name="app_name">Honor 600 Cam</string>
+    <string name="permission_title">Honor 600 Flagship Camera</string>
+    <string name="permission_subtitle">Grant Camera and Microphone access to unlock 4K/60fps high-bitrate video, low-light temporal denoise, instant Smart HDR super-resolution, and Pro Camera2 controls.</string>
     <string name="grant_permissions_button">Enable Camera &amp; Audio</string>
     <string name="grant_camera_only_button">Camera Only Mode</string>
-    <string name="open_gallery_button">Open Studio Gallery</string>
+    <string name="open_gallery_button">Open Honor 600 Gallery</string>
     <string name="shutter_content_desc">Capture photo or toggle video recording</string>
     <string name="switch_camera_desc">Switch between front and rear camera</string>
     <string name="gallery_preview_desc">Open built-in photo and video gallery</string>
@@ -15,6 +15,6 @@
     <string name="settings_control_desc">Open camera settings</string>
     <string name="ai_optimizer_desc">AI Scene Optimizer and Pro Coach</string>
     <string name="pro_reset_label">RESET</string>
-    <string name="gallery_title">Galaxy Studio Gallery</string>
-    <string name="editor_title">Pro Photo Studio</string>
+    <string name="gallery_title">Honor 600 Studio Gallery</string>
+    <string name="editor_title">Honor 600 Pro Studio</string>
 </resources>

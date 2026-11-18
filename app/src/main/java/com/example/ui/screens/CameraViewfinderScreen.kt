@@ -188,10 +188,13 @@ fun CameraViewfinderScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
+                    var lastPinchUpdateMs = 0L
                     detectTransformGestures { _, _, zoomChange, _ ->
-                        if (abs(zoomChange - 1f) > 0.01f) {
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (abs(zoomChange - 1f) > 0.012f && (now - lastPinchUpdateMs >= 16L)) {
+                            lastPinchUpdateMs = now
                             val nextZoom = state.currentZoomRatio * zoomChange
-                            viewModel.setZoomRatio(nextZoom)
+                            viewModel.setZoomRatio(nextZoom, isContinuousGesture = true)
                         }
                     }
                 }

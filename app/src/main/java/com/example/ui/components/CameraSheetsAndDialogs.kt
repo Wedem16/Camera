@@ -989,12 +989,12 @@ fun CameraSettingsDialog(
             ) {
                 Column {
                     Text(
-                        text = "CAMERA & HARDWARE SETTINGS",
+                        text = "HONOR 600 CAM • HARDWARE SETTINGS",
                         style = MaterialTheme.typography.labelLarge,
                         color = GalaxyAmber
                     )
                     Text(
-                        text = "Native Capture Pipeline • NR=FAST • EDGE=FAST",
+                        text = "4K 60fps Temporal Denoise • Fast On-Device HDR SR",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondaryZinc
                     )

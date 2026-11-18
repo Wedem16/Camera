@@ -79,6 +79,8 @@ class CameraHardwareController(private val context: Context) {
     private var activeRecording: Recording? = null
     private var boundPreviewView: PreviewView? = null
     private var lastInspectedCapabilities: HardwareCapabilities = HardwareCapabilities()
+    private var lastAppliedHardwareZoom: Float = -1f
+    private var lastBoundIsVideoOrNight: Boolean = false
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
@@ -256,14 +258,29 @@ class CameraHardwareController(private val context: Context) {
                 val previewBuilder = Preview.Builder()
                     .setResolutionSelector(previewResolutionSelector)
 
-                // IMPORTANT: Only lock AE target FPS in Video mode.
-                // Locking [60, 60] FPS in Photo mode forces mobile sensors into 720p/1080p video-binned
-                // readout and caps exposure at 1/60s, ruining dynamic range and viewfinder sharpness!
+                val useHighQualityHardwareDenoise = isVideoMode || activeMode == CameraMode.NIGHT
+                lastBoundIsVideoOrNight = useHighQualityHardwareDenoise
+                lastAppliedHardwareZoom = -1f
+
+                // Strict 60fps lock in Video mode + Hardware Temporal Noise Reduction & Chroma Aberration Suppression
                 if (isVideoMode) {
-                    Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
-                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                        Range(videoFps.fps, videoFps.fps)
-                    )
+                    Camera2Interop.Extender(previewBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            Range(videoFps.fps, videoFps.fps)
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.NOISE_REDUCTION_MODE,
+                            CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+                            CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.HOT_PIXEL_MODE,
+                            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                        )
                 }
 
                 val preview = previewBuilder.build().also {
@@ -320,12 +337,20 @@ class CameraHardwareController(private val context: Context) {
                             CameraMetadata.COLOR_CORRECTION_MODE_HIGH_QUALITY
                         )
                         .setCaptureRequestOption(
+                            CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+                            CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.HOT_PIXEL_MODE,
+                            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
                             CaptureRequest.TONEMAP_MODE,
                             CameraMetadata.TONEMAP_MODE_HIGH_QUALITY
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.NOISE_REDUCTION_MODE,
-                            CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                            CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.EDGE_MODE,
@@ -607,13 +632,9 @@ class CameraHardwareController(private val context: Context) {
         val sensorMax = (zoomState?.maxZoomRatio ?: 8.0f).coerceAtLeast(1.0f)
 
         val hardwareTarget = target.coerceIn(sensorMin, sensorMax)
-        camera.cameraControl.setZoomRatio(hardwareTarget)
-
-        // Ensure PreviewView stays at 1.0x un-stretched scale (no artificial digital preview stretch)
-        boundPreviewView?.let { pv ->
-            pv.scaleType = PreviewView.ScaleType.FILL_CENTER
-            pv.scaleX = 1.0f
-            pv.scaleY = 1.0f
+        if (kotlin.math.abs(hardwareTarget - lastAppliedHardwareZoom) >= 0.01f) {
+            lastAppliedHardwareZoom = hardwareTarget
+            camera.cameraControl.setZoomRatio(hardwareTarget)
         }
 
         // Return 1.0f so MediaGalleryRepository saves the native optical/ISP output without center-cropping.
@@ -736,12 +757,29 @@ class CameraHardwareController(private val context: Context) {
                 }
             )
 
-            // CRITICAL FIX FOR HONOR 600 / MAGICOS FOLIAGE QUALITY:
-            // Set NOISE_REDUCTION_MODE and EDGE_MODE to FAST instead of HIGH_QUALITY.
-            // HIGH_QUALITY triggers heavy vendor denoise + halo sharpening that makes leaves look smeared.
+            // In Video mode, Night mode, or high manual ISO (>= 800), enable hardware temporal & spatial
+            // noise reduction + hot-pixel/aberration suppression to eliminate high-ISO night grain at 60fps.
+            // In standard daylight photo modes, keep FAST noise reduction so foliage textures stay crisp.
+            val useHighIsoDenoise = lastBoundIsVideoOrNight || (proSettings.iso != null && proSettings.iso >= 800)
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.NOISE_REDUCTION_MODE,
-                CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                if (useHighIsoDenoise) {
+                    CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                } else {
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                }
+            )
+            optionsBuilder.setCaptureRequestOption(
+                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+                CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+            )
+            optionsBuilder.setCaptureRequestOption(
+                CaptureRequest.HOT_PIXEL_MODE,
+                if (useHighIsoDenoise) {
+                    CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                } else {
+                    CameraMetadata.HOT_PIXEL_MODE_FAST
+                }
             )
             optionsBuilder.setCaptureRequestOption(
                 CaptureRequest.EDGE_MODE,

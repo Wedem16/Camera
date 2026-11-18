@@ -204,10 +204,14 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
     }
 
     /**
-     * Mild 3x3 luminance-guided unsharp mask with a noise floor threshold so flat areas
-     * (sky, skin, shadows) are not noisy and foliage edges remain natural without halos.
-     * When `enableSmartHdrToneMap` is true, also performs Honor 600 Smart HDR Highlight Roll-Off
-     * (recovering blown highlights > 205) and Shadow Lift (lifting dark shadows < 55).
+     * Single-pass Honor 600 Computational Tile Filter:
+     * 1. **High-ISO Bilateral Chroma & Shadow Luma Denoise**: Suppresses color speckles (Cb/Cr blotches)
+     *    and dark-sky/shadow sensor grain (`luma < 85` where local gradient is below edge threshold)
+     *    while leaving structural edges (streetlights, wires, text, foliage outlines) 100% untouched.
+     * 2. **Smart HDR Tone Mapping** (when `enableSmartHdrToneMap` is true): Smoothly rolls off bright
+     *    highlights (`luma > 205`) and gently recovers shadow detail (`luma in 8..54`).
+     * 3. **Luminance-Guided Edge-Only Unsharp Mask**: Sharpens only genuine edges (`abs(diff) >= threshold`)
+     *    so flat sky and shadow regions never have noise amplified.
      */
     private fun applyMildUnsharpMask(
         tile: Bitmap,
@@ -233,6 +237,44 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
                 var cg = (center shr 8) and 0xFF
                 var cb = center and 0xFF
 
+                val top = inPixels[idx - w]
+                val bottom = inPixels[idx + w]
+                val left = inPixels[idx - 1]
+                val right = inPixels[idx + 1]
+
+                // 4-neighbor local average
+                val br = (((top shr 16) and 0xFF) + ((bottom shr 16) and 0xFF) + ((left shr 16) and 0xFF) + ((right shr 16) and 0xFF)) shr 2
+                val bg = (((top shr 8) and 0xFF) + ((bottom shr 8) and 0xFF) + ((left shr 8) and 0xFF) + ((right shr 8) and 0xFF)) shr 2
+                val bb = ((top and 0xFF) + (bottom and 0xFF) + (left and 0xFF) + (right and 0xFF)) shr 2
+
+                val centerLuma = (cr * 77 + cg * 150 + cb * 29) shr 8
+                val neighborLuma = (br * 77 + bg * 150 + bb * 29) shr 8
+                val lumaDelta = abs(centerLuma - neighborLuma)
+
+                // Stage 1: High-ISO Bilateral Chroma & Shadow Luma Denoise
+                // In dark/night regions (centerLuma < 90) where lumaDelta is small (flat sky/wall/shadow, not an edge),
+                // suppress high-ISO chroma speckles and shadow grain by bilateral blending with neighbors.
+                if (centerLuma < 90 && lumaDelta < threshold + 8) {
+                    if (lumaDelta < threshold) {
+                        // Flat shadow/sky region: strong bilateral luma + chroma smoothing (65% neighbor, 35% center)
+                        cr = (cr * 35 + br * 65) / 100
+                        cg = (cg * 35 + bg * 65) / 100
+                        cb = (cb * 35 + bb * 65) / 100
+                    } else {
+                        // Near-edge transition in low light: suppress chroma noise while preserving center luminance
+                        val neighborChromaR = br - neighborLuma
+                        val neighborChromaG = bg - neighborLuma
+                        val neighborChromaB = bb - neighborLuma
+                        val centerChromaR = cr - centerLuma
+                        val centerChromaG = cg - centerLuma
+                        val centerChromaB = cb - centerLuma
+                        cr = (centerLuma + ((centerChromaR + neighborChromaR) shr 1)).coerceIn(0, 255)
+                        cg = (centerLuma + ((centerChromaG + neighborChromaG) shr 1)).coerceIn(0, 255)
+                        cb = (centerLuma + ((centerChromaB + neighborChromaB) shr 1)).coerceIn(0, 255)
+                    }
+                }
+
+                // Stage 2: Honor 600 Smart HDR Highlight Roll-Off & Shadow Lift
                 if (enableSmartHdrToneMap) {
                     val luma = (cr * 77 + cg * 150 + cb * 29) shr 8
                     if (luma > 205) {
@@ -244,31 +286,24 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
                         cg = (cg * scale).roundToInt().coerceIn(0, 255)
                         cb = (cb * scale).roundToInt().coerceIn(0, 255)
                     } else if (luma in 8..54) {
-                        // Gentle shadow recovery without amplifying black-level noise
-                        val lift = ((55 - luma) * 18) / 55
+                        // Gentle shadow recovery after bilateral denoise so lifted shadows remain clean
+                        val lift = ((55 - luma) * 16) / 55
                         cr = (cr + lift).coerceIn(0, 255)
                         cg = (cg + lift).coerceIn(0, 255)
                         cb = (cb + lift).coerceIn(0, 255)
                     }
                 }
 
-                val top = inPixels[idx - w]
-                val bottom = inPixels[idx + w]
-                val left = inPixels[idx - 1]
-                val right = inPixels[idx + 1]
-
-                // 4-neighbor local blur estimate
-                val br = (((top shr 16) and 0xFF) + ((bottom shr 16) and 0xFF) + ((left shr 16) and 0xFF) + ((right shr 16) and 0xFF)) shr 2
-                val bg = (((top shr 8) and 0xFF) + ((bottom shr 8) and 0xFF) + ((left shr 8) and 0xFF) + ((right shr 8) and 0xFF)) shr 2
-                val bb = ((top and 0xFF) + (bottom and 0xFF) + (left and 0xFF) + (right and 0xFF)) shr 2
-
+                // Stage 3: Edge-Only Unsharp Mask (only sharpens when gradient exceeds noise threshold
+                // and pixel is above deep-black noise floor > 24)
                 val diffR = cr - br
                 val diffG = cg - bg
                 val diffB = cb - bb
+                val effectiveThreshold = if (centerLuma < 55) threshold + 4 else threshold
 
-                val nr = if (abs(diffR) >= threshold) (cr + (diffR * amount).roundToInt()).coerceIn(0, 255) else cr
-                val ng = if (abs(diffG) >= threshold) (cg + (diffG * amount).roundToInt()).coerceIn(0, 255) else cg
-                val nb = if (abs(diffB) >= threshold) (cb + (diffB * amount).roundToInt()).coerceIn(0, 255) else cb
+                val nr = if (abs(diffR) >= effectiveThreshold) (cr + (diffR * amount).roundToInt()).coerceIn(0, 255) else cr
+                val ng = if (abs(diffG) >= effectiveThreshold) (cg + (diffG * amount).roundToInt()).coerceIn(0, 255) else cg
+                val nb = if (abs(diffB) >= effectiveThreshold) (cb + (diffB * amount).roundToInt()).coerceIn(0, 255) else cb
 
                 outPixels[idx] = (center and -0x1000000) or (nr shl 16) or (ng shl 8) or nb
             }
