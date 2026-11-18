@@ -4,8 +4,10 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -22,16 +24,22 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -44,6 +52,7 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.example.model.CameraMode
 import com.example.model.FlashSetting
 import com.example.model.HardwareCapabilities
 import com.example.model.ProCameraSettings
@@ -116,9 +125,48 @@ class CameraHardwareController(private val context: Context) {
         }
     }
 
+    /**
+     * Queries Camera2 StreamConfigurationMap for the highest-resolution SurfaceTexture preview stream
+     * (targeting up to 4K UHD 3840×2160 / QHD+ 2560×1920) so the live viewfinder is razor-sharp
+     * instead of defaulting to 720p.
+     */
+    private fun queryBestHighResPreviewSize(lensFacing: Int, isVideoMode: Boolean): Size {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                ?: return if (isVideoMode) Size(3840, 2160) else Size(2560, 1920)
+            val targetCamera2Facing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+            var bestPreview: Size? = null
+            for (cameraId in cameraManager.cameraIdList) {
+                val chars = cameraManager.getCameraCharacteristics(cameraId)
+                if (chars.get(CameraCharacteristics.LENS_FACING) == targetCamera2Facing) {
+                    val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    val previewSizes: List<Size> = map?.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
+                    // Pick the highest preview resolution up to 3840x2160 (4K UHD) so GPU preview is ultra crisp
+                    val candidate = previewSizes
+                        .filter { it.width <= 3840 && it.height <= 2880 }
+                        .maxByOrNull { it.width.toLong() * it.height.toLong() }
+                    if (candidate != null) {
+                        val currPx = (bestPreview?.width?.toLong() ?: 0L) * (bestPreview?.height?.toLong() ?: 0L)
+                        if (candidate.width.toLong() * candidate.height.toLong() > currPx) {
+                            bestPreview = candidate
+                        }
+                    }
+                }
+            }
+            bestPreview ?: if (isVideoMode) Size(3840, 2160) else Size(2560, 1920)
+        } catch (e: Exception) {
+            if (isVideoMode) Size(3840, 2160) else Size(2560, 1920)
+        }
+    }
+
     fun bindCamera(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
+        activeMode: CameraMode = CameraMode.PHOTO,
         isVideoMode: Boolean,
         lensFacing: Int,
         flashSetting: FlashSetting,
@@ -154,15 +202,70 @@ class CameraHardwareController(private val context: Context) {
                     else -> CameraSelector.LENS_FACING_BACK
                 }
 
-                val selector = CameraSelector.Builder()
+                val baseSelector = CameraSelector.Builder()
                     .requireLensFacing(resolvedLens)
                     .build()
 
+                // Check Honor / MagicOS CameraX Vendor Extensions (HDR, Night, Bokeh, FaceRetouch, Auto)
+                var activeSelector = baseSelector
+                var activeExtensionLabel = "Native 4K ISP"
+                if (!isVideoMode && activeMode != CameraMode.PRO) {
+                    runCatching {
+                        val extensionsManager = ExtensionsManager.getInstanceAsync(context, provider).get()
+                        val preferredExtModes = when (activeMode) {
+                            CameraMode.HDR -> listOf(ExtensionMode.HDR, ExtensionMode.AUTO)
+                            CameraMode.NIGHT -> listOf(ExtensionMode.NIGHT, ExtensionMode.AUTO)
+                            CameraMode.PORTRAIT -> listOf(ExtensionMode.BOKEH, ExtensionMode.HDR, ExtensionMode.AUTO)
+                            CameraMode.BEAUTY -> listOf(ExtensionMode.FACE_RETOUCH, ExtensionMode.AUTO)
+                            else -> listOf(ExtensionMode.HDR, ExtensionMode.AUTO)
+                        }
+                        for (extMode in preferredExtModes) {
+                            if (extensionsManager.isExtensionAvailable(baseSelector, extMode)) {
+                                activeSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, extMode)
+                                activeExtensionLabel = when (extMode) {
+                                    ExtensionMode.HDR -> "Honor Hardware HDR Extension"
+                                    ExtensionMode.NIGHT -> "Honor Hardware Night Extension"
+                                    ExtensionMode.BOKEH -> "Honor Hardware Bokeh Extension"
+                                    ExtensionMode.FACE_RETOUCH -> "Honor Hardware Beauty Extension"
+                                    ExtensionMode.AUTO -> "Honor Hardware Auto-ISP Extension"
+                                    else -> "Honor Vendor Extension"
+                                }
+                                break
+                            }
+                        }
+                    }.onFailure {
+                        Log.i(TAG, "Vendor extensions check skipped: ${it.message}")
+                    }
+                }
+
+                // Configure High-Resolution PreviewSelector (prevents 720p viewfinder downgrade!)
+                val targetPreviewSize = queryBestHighResPreviewSize(resolvedLens, isVideoMode)
+                val previewResolutionSelector = ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(
+                        if (isVideoMode) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                        else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+                    )
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            targetPreviewSize,
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                        )
+                    )
+                    .build()
+
                 val previewBuilder = Preview.Builder()
-                Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    Range(videoFps.fps, videoFps.fps)
-                )
+                    .setResolutionSelector(previewResolutionSelector)
+
+                // IMPORTANT: Only lock AE target FPS in Video mode.
+                // Locking [60, 60] FPS in Photo mode forces mobile sensors into 720p/1080p video-binned
+                // readout and caps exposure at 1/60s, ruining dynamic range and viewfinder sharpness!
+                if (isVideoMode) {
+                    Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        Range(videoFps.fps, videoFps.fps)
+                    )
+                }
+
                 val preview = previewBuilder.build().also {
                     it.surfaceProvider = previewView.surfaceProvider
                 }
@@ -171,40 +274,77 @@ class CameraHardwareController(private val context: Context) {
 
                 val camera: Camera
                 if (isVideoMode) {
-                    val qualityList = if (videoResolution == VideoResolutionSetting.UHD_4K) {
-                        listOf(Quality.UHD, Quality.FHD, Quality.HD)
-                    } else {
-                        listOf(Quality.FHD, Quality.UHD, Quality.HD)
-                    }
-                    val qualitySelector = QualitySelector.fromOrderedList(
-                        qualityList,
-                        FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
+                    val targetCameraInfo = runCatching {
+                        provider.availableCameraInfos.firstOrNull { info ->
+                            val c2 = Camera2CameraInfo.from(info)
+                            val expectedFacing = if (resolvedLens == CameraSelector.LENS_FACING_FRONT) {
+                                CameraCharacteristics.LENS_FACING_FRONT
+                            } else {
+                                CameraCharacteristics.LENS_FACING_BACK
+                            }
+                            c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) == expectedFacing
+                        }
+                    }.getOrNull()
+
+                    val videoConfig = resolveVideoQualityAndBitrate(
+                        cameraInfo = targetCameraInfo,
+                        videoResolution = videoResolution,
+                        videoFps = videoFps,
+                        requestedBitrateMbps = videoBitrateMbps
                     )
-                    val targetBitsPerSec = (videoBitrateMbps.coerceIn(1, 1000) * 1_000_000L)
-                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
                     val recorderBuilder = Recorder.Builder()
-                        .setQualitySelector(qualitySelector)
+                        .setQualitySelector(videoConfig.qualitySelector)
+                        .setAspectRatio(AspectRatio.RATIO_16_9)
+
                     runCatching {
-                        recorderBuilder.setTargetVideoEncodingBitRate(targetBitsPerSec)
+                        recorderBuilder.setTargetVideoEncodingBitRate(videoConfig.targetEncodingBitrateBps)
                     }.onFailure {
-                        Log.w(TAG, "Bitrate clamp applied by encoder: ${it.message}")
+                        Log.w(TAG, "Primary bitrate clamp applied by encoder (${it.message}); applying high-density fallback")
+                        runCatching {
+                            recorderBuilder.setTargetVideoEncodingBitRate(PRO_4K60_FALLBACK_BITRATE_BPS)
+                        }
                     }
 
                     val recorder = recorderBuilder.build()
-                    val vidCapture = VideoCapture.withOutput(recorder)
+                    val vidCaptureBuilder = VideoCapture.Builder(recorder)
+                        .setTargetFrameRate(Range(videoFps.fps, videoFps.fps))
+
+                    Camera2Interop.Extender(vidCaptureBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            Range(videoFps.fps, videoFps.fps)
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.COLOR_CORRECTION_MODE,
+                            CameraMetadata.COLOR_CORRECTION_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.TONEMAP_MODE,
+                            CameraMetadata.TONEMAP_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.NOISE_REDUCTION_MODE,
+                            CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.EDGE_MODE,
+                            CameraMetadata.EDGE_MODE_FAST
+                        )
+
+                    val vidCapture = vidCaptureBuilder.build()
                     videoCapture = vidCapture
                     imageCapture = null
 
                     camera = provider.bindToLifecycle(
                         lifecycleOwner,
-                        selector,
+                        activeSelector,
                         preview,
                         vidCapture
                     )
                     onDiagnosticLog(
-                        "VIDEO",
-                        "Bound 2-Stream ${videoResolution.shortLabel} @ ${videoFps.fps}fps | Bitrate: ${videoBitrateMbps} Mbps"
+                        "VIDEO-QSEL",
+                        videoConfig.profileSummary
                     )
                 } else {
                     val resolutionStrategy = if (maxNativeSize != null) {
@@ -216,6 +356,7 @@ class CameraHardwareController(private val context: Context) {
                         ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
                     }
                     val highestResSelector = ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                         .setResolutionStrategy(resolutionStrategy)
                         .build()
 
@@ -225,9 +366,25 @@ class CameraHardwareController(private val context: Context) {
                         .setFlashMode(mapFlashMode(flashSetting))
                         .setJpegQuality(100)
 
-                    // Set CaptureRequest.NOISE_REDUCTION_MODE and EDGE_MODE to FAST on ImageCapture
-                    // so the vendor HAL does NOT apply oil-painting denoise or harsh halo oversharpening on foliage.
-                    Camera2Interop.Extender(imgCaptureBuilder)
+                    // Enable High-Quality Color Correction, Tonemapping, Shading & Distortion Correction
+                    // while keeping Noise Reduction & Edge mode balanced so details are razor-sharp.
+                    val extender = Camera2Interop.Extender(imgCaptureBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.JPEG_QUALITY,
+                            100.toByte()
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.COLOR_CORRECTION_MODE,
+                            CameraMetadata.COLOR_CORRECTION_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.TONEMAP_MODE,
+                            CameraMetadata.TONEMAP_MODE_HIGH_QUALITY
+                        )
+                        .setCaptureRequestOption(
+                            CaptureRequest.SHADING_MODE,
+                            CameraMetadata.SHADING_MODE_HIGH_QUALITY
+                        )
                         .setCaptureRequestOption(
                             CaptureRequest.NOISE_REDUCTION_MODE,
                             CameraMetadata.NOISE_REDUCTION_MODE_FAST
@@ -236,42 +393,41 @@ class CameraHardwareController(private val context: Context) {
                             CaptureRequest.EDGE_MODE,
                             CameraMetadata.EDGE_MODE_FAST
                         )
-                        .setCaptureRequestOption(
-                            CaptureRequest.JPEG_QUALITY,
-                            100.toByte()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        extender.setCaptureRequestOption(
+                            CaptureRequest.DISTORTION_CORRECTION_MODE,
+                            CameraMetadata.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
                         )
+                    }
 
                     val imgCapture = imgCaptureBuilder.build()
                     imageCapture = imgCapture
                     videoCapture = null
 
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also {
-                            it.setAnalyzer(cameraExecutor, frameAnalyzer)
-                        }
-
+                    // CRITICAL FOR 4K VIEWFINDER & MAX-MP CAPTURE ON HONOR 600:
+                    // Bind ONLY 2 streams (Preview + ImageCapture) instead of 3 (Preview + ImageCapture + ImageAnalysis).
+                    // In Camera2 stream configuration tables, omitting the 3rd YUV stream unlocks MAXIMUM
+                    // preview resolution (QHD+/4K) and full sensor resolution JPEG capture simultaneously!
                     camera = try {
                         provider.bindToLifecycle(
                             lifecycleOwner,
-                            selector,
+                            activeSelector,
                             preview,
-                            imgCapture,
-                            imageAnalysis
+                            imgCapture
                         )
                     } catch (e: Exception) {
                         provider.bindToLifecycle(
                             lifecycleOwner,
-                            selector,
+                            baseSelector,
                             preview,
                             imgCapture
                         )
                     }
                     val resInfo = imgCapture.resolutionInfo?.resolution ?: maxNativeSize
+                    val prevInfo = preview.resolutionInfo?.resolution ?: targetPreviewSize
                     onDiagnosticLog(
                         "CAPTURE-CFG",
-                        "Bound Native Sensor (${resInfo?.width ?: 4096}×${resInfo?.height ?: 3072}) | NR=FAST | EDGE=FAST | Quality=MAX"
+                        "2-Stream Max Quality | Preview=${prevInfo.width}×${prevInfo.height} | Capture=${resInfo?.width ?: 4096}×${resInfo?.height ?: 3072} | ISP=$activeExtensionLabel"
                     )
                 }
 
@@ -282,7 +438,7 @@ class CameraHardwareController(private val context: Context) {
                 onHardwareInspected(capabilities)
                 onDiagnosticLog(
                     "SENSOR",
-                    "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | Optical=${capabilities.sensorMinZoomRatio}x..${capabilities.sensorMaxZoomRatio}x | PhysIDs=${capabilities.physicalCameraIds} | TeleID=${capabilities.telephotoPhysicalCameraId ?: "none"} | RAW=${capabilities.supportsRawCapability}"
+                    "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | Optical=${capabilities.sensorMinZoomRatio}x..${capabilities.sensorMaxZoomRatio}x | PhysIDs=${capabilities.physicalCameraIds} | ISP=$activeExtensionLabel"
                 )
 
                 applyCamera2Parameters(proSettings, videoStabilizationEnabled)
@@ -616,11 +772,24 @@ class CameraHardwareController(private val context: Context) {
         }
 
         capture.takePicture(
-            ContextCompat.getMainExecutor(context),
+            cameraExecutor,
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     try {
-                        val rawBitmap = image.toBitmap()
+                        // Decode full uncompressed ARGB_8888 directly from hardware JPEG plane when available
+                        val rawBitmap = if (image.format == ImageFormat.JPEG && image.planes.isNotEmpty()) {
+                            val buffer = image.planes[0].buffer
+                            buffer.rewind()
+                            val bytes = ByteArray(buffer.remaining())
+                            buffer.get(bytes)
+                            val opts = BitmapFactory.Options().apply {
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
+                                inScaled = false
+                            }
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: image.toBitmap()
+                        } else {
+                            image.toBitmap()
+                        }
                         val rotation = image.imageInfo.rotationDegrees
                         val matrix = Matrix().apply {
                             if (rotation != 0) postRotate(rotation.toFloat())
@@ -639,11 +808,15 @@ class CameraHardwareController(private val context: Context) {
                         } else {
                             rawBitmap
                         }
-                        onBitmapCaptured(oriented)
+                        ContextCompat.getMainExecutor(context).execute {
+                            onBitmapCaptured(oriented)
+                        }
                     } catch (e: Exception) {
                         Log.e(TAG, "Bitmap conversion failed, falling back to viewfinder bitmap", e)
-                        boundPreviewView?.bitmap?.let(onBitmapCaptured)
-                            ?: onError("Failed to decode captured photo.")
+                        ContextCompat.getMainExecutor(context).execute {
+                            boundPreviewView?.bitmap?.let(onBitmapCaptured)
+                                ?: onError("Failed to decode captured photo.")
+                        }
                     } finally {
                         image.close()
                     }
@@ -651,11 +824,13 @@ class CameraHardwareController(private val context: Context) {
 
                 override fun onError(exception: ImageCaptureException) {
                     Log.w(TAG, "ImageCapture failed (${exception.message}), using live viewfinder frame")
-                    val fallback = boundPreviewView?.bitmap
-                    if (fallback != null) {
-                        onBitmapCaptured(fallback)
-                    } else {
-                        onError(exception.localizedMessage ?: "Failed to capture photo.")
+                    ContextCompat.getMainExecutor(context).execute {
+                        val fallback = boundPreviewView?.bitmap
+                        if (fallback != null) {
+                            onBitmapCaptured(fallback)
+                        } else {
+                            onError(exception.localizedMessage ?: "Failed to capture photo.")
+                        }
                     }
                 }
             }
@@ -800,7 +975,146 @@ class CameraHardwareController(private val context: Context) {
             FlashSetting.OFF -> ImageCapture.FLASH_MODE_OFF
         }
     }
+
+    companion object {
+        /**
+         * Minimum prioritized bitrate (in Mbps) when 4K / 60fps is selected so high-motion
+         * 3840×2160 @ 60fps frames maintain pro-grade bits-per-pixel-frame data density (~0.50+ bpp).
+         */
+        const val PRO_4K60_MIN_BITRATE_MBPS = 250
+        const val PRO_4K30_DEFAULT_BITRATE_MBPS = 150
+        const val PRO_FHD60_DEFAULT_BITRATE_MBPS = 100
+        const val PRO_4K60_FALLBACK_BITRATE_BPS = 160_000_000
+
+        /**
+         * Builds the `QualitySelector` and prioritized target encoding bitrate for `VideoCapture`.
+         *
+         * - When **4K / 60fps** (`UHD_4K` + `FPS_60`) is selected:
+         *   1. Prioritizes `Quality.UHD` (`3840×2160`) at the head of `QualitySelector.fromOrderedList`
+         *      with `FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)`, consulting hardware
+         *      `Recorder.getVideoCapabilities(cameraInfo)` when available so the encoder selects its
+         *      highest-tier Level 5.1/5.2 hardware profile.
+         *   2. Prioritizes higher bitrates by applying a `1.6x` high-frame-rate data-density multiplier
+         *      and enforcing a minimum floor of `PRO_4K60_MIN_BITRATE_MBPS` (`250 Mbps`, up to `1000 Mbps`)
+         *      to prevent macroblocking and motion compression artifacts at 497.6M pixels/sec.
+         */
+        fun resolveVideoQualityAndBitrate(
+            cameraInfo: CameraInfo?,
+            videoResolution: VideoResolutionSetting,
+            videoFps: VideoFpsSetting,
+            requestedBitrateMbps: Int
+        ): VideoQualityAndBitrateConfig {
+            val is4k = videoResolution == VideoResolutionSetting.UHD_4K
+            val is60Fps = videoFps == VideoFpsSetting.FPS_60
+            val is4k60HighDensityMode = is4k && is60Fps
+
+            // Inspect hardware-supported SDR qualities if CameraInfo is available
+            val hardwareSupportedQualities: List<Quality> = if (cameraInfo != null) {
+                runCatching {
+                    Recorder.getVideoCapabilities(cameraInfo)
+                        .getSupportedQualities(DynamicRange.SDR)
+                }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+
+            val desiredQualityOrder = when {
+                is4k60HighDensityMode -> listOf(Quality.UHD, Quality.HIGHEST, Quality.FHD, Quality.HD)
+                is4k -> listOf(Quality.UHD, Quality.FHD, Quality.HD)
+                else -> listOf(Quality.FHD, Quality.UHD, Quality.HD)
+            }.distinct()
+
+            val prioritizedQualityOrder = if (hardwareSupportedQualities.isNotEmpty()) {
+                val filtered = desiredQualityOrder.filter { it == Quality.HIGHEST || hardwareSupportedQualities.contains(it) }
+                if (filtered.isNotEmpty()) filtered else desiredQualityOrder
+            } else {
+                desiredQualityOrder
+            }
+
+            val primaryFallbackAnchor = if (is4k) Quality.UHD else Quality.FHD
+            val fallbackStrategy = if (is4k60HighDensityMode) {
+                // Strictly prefer higher quality first, then closest lower quality than UHD
+                FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)
+            } else {
+                FallbackStrategy.higherQualityOrLowerThan(primaryFallbackAnchor)
+            }
+
+            val qualitySelector = QualitySelector.fromOrderedList(
+                prioritizedQualityOrder,
+                fallbackStrategy
+            )
+
+            // Prioritize higher bitrates when 4K/60fps is selected for pro-grade data density
+            val clampedRequestedMbps = requestedBitrateMbps.coerceIn(10, 1000)
+            val effectiveBitrateMbps = when {
+                is4k60HighDensityMode -> {
+                    // Boost sub-pro bitrates by 1.6x and enforce at least 250 Mbps floor for 4K/60fps
+                    val densityBoosted = (clampedRequestedMbps * 1.6f).toInt()
+                    maxOf(clampedRequestedMbps, densityBoosted, PRO_4K60_MIN_BITRATE_MBPS).coerceIn(PRO_4K60_MIN_BITRATE_MBPS, 1000)
+                }
+                is4k -> {
+                    clampedRequestedMbps.coerceIn(25, 1000)
+                }
+                is60Fps -> {
+                    // 1080p @ 60fps also benefits from at least 50 Mbps floor when user hasn't set lower
+                    clampedRequestedMbps.coerceIn(15, 1000)
+                }
+                else -> clampedRequestedMbps
+            }
+
+            val targetEncodingBitrateBps = (effectiveBitrateMbps.toLong() * 1_000_000L)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+
+            val pixelsPerFrame = if (is4k) 3840f * 2160f else 1920f * 1080f
+            val dataDensityBpp = targetEncodingBitrateBps.toFloat() / (pixelsPerFrame * videoFps.fps.toFloat())
+
+            val qualityNames = prioritizedQualityOrder.joinToString("→") { q ->
+                when (q) {
+                    Quality.UHD -> "UHD(4K)"
+                    Quality.FHD -> "FHD(1080p)"
+                    Quality.HD -> "HD(720p)"
+                    Quality.SD -> "SD(480p)"
+                    Quality.HIGHEST -> "HIGHEST"
+                    Quality.LOWEST -> "LOWEST"
+                    else -> "Q"
+                }
+            }
+
+            val profileSummary = buildString {
+                append("${videoResolution.shortLabel}@${videoFps.fps}fps")
+                append(" | QSelector=[$qualityNames]")
+                append(" | Bitrate=${effectiveBitrateMbps}Mbps")
+                if (is4k60HighDensityMode && effectiveBitrateMbps > clampedRequestedMbps) {
+                    append(" (4K60 Pro Boost from ${clampedRequestedMbps}Mbps)")
+                }
+                append(" | Density=${String.format(Locale.US, "%.2f", dataDensityBpp)} bpp")
+            }
+
+            return VideoQualityAndBitrateConfig(
+                qualitySelector = qualitySelector,
+                prioritizedQualityOrder = prioritizedQualityOrder,
+                requestedBitrateMbps = clampedRequestedMbps,
+                effectiveBitrateMbps = effectiveBitrateMbps,
+                targetEncodingBitrateBps = targetEncodingBitrateBps,
+                is4k60HighDensityMode = is4k60HighDensityMode,
+                dataDensityBitsPerPixelFrame = dataDensityBpp,
+                profileSummary = profileSummary
+            )
+        }
+    }
 }
+
+data class VideoQualityAndBitrateConfig(
+    val qualitySelector: QualitySelector,
+    val prioritizedQualityOrder: List<Quality>,
+    val requestedBitrateMbps: Int,
+    val effectiveBitrateMbps: Int,
+    val targetEncodingBitrateBps: Int,
+    val is4k60HighDensityMode: Boolean,
+    val dataDensityBitsPerPixelFrame: Float,
+    val profileSummary: String
+)
 
 sealed interface VideoRecordStatus {
     data class Recording(

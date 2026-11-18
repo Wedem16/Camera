@@ -258,6 +258,65 @@ class AiSceneOptimizerRepository {
     }
 
     /**
+     * Computes `RealTimeSceneMetrics` (16-bin luminance histogram, average luminance, dynamic range,
+     * warmth, and scene classification) from a downscaled viewfinder snapshot so the Camera2 HAL
+     * only needs 2 streams (`Preview` + `ImageCapture`) for full 4K/QHD+ viewfinder sharpness.
+     */
+    fun computeSceneMetricsFromBitmap(bitmap: Bitmap): RealTimeSceneMetrics {
+        val sampleBmp = scaleBitmapForAi(bitmap, 160)
+        val w = sampleBmp.width.coerceAtLeast(1)
+        val h = sampleBmp.height.coerceAtLeast(1)
+        val pixels = IntArray(w * h)
+        sampleBmp.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val bins = IntArray(16)
+        var totalLuma = 0L
+        var darkCount = 0
+        var brightCount = 0
+        var rSum = 0L
+        var bSum = 0L
+
+        for (px in pixels) {
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val b = px and 0xFF
+            val luma = ((r * 77 + g * 150 + b * 29) shr 8).coerceIn(0, 255)
+            totalLuma += luma
+            rSum += r
+            bSum += b
+            bins[(luma / 16).coerceIn(0, 15)]++
+            if (luma < 45) darkCount++
+            if (luma > 210) brightCount++
+        }
+
+        val count = pixels.size.coerceAtLeast(1)
+        val avgLuma = totalLuma.toFloat() / count
+        val maxBin = (bins.maxOrNull() ?: 1).coerceAtLeast(1)
+        val normalizedBins = bins.map { (it.toFloat() / maxBin).coerceIn(0.05f, 1.0f) }
+        val darkRatio = darkCount.toFloat() / count
+        val brightRatio = brightCount.toFloat() / count
+        val dynamicSpread = (darkRatio + brightRatio).coerceIn(0f, 1f)
+        val avgR = rSum.toFloat() / count
+        val avgB = bSum.toFloat() / count
+        val warmthScore = ((avgR - avgB) / 64f).coerceIn(-1f, 1f)
+
+        val detectedScene = classifyScene(
+            avgLuma = avgLuma,
+            darkRatio = darkRatio,
+            brightRatio = brightRatio,
+            warmthScore = warmthScore
+        )
+
+        return RealTimeSceneMetrics(
+            detectedScene = detectedScene,
+            averageLuminance = avgLuma,
+            dynamicRangeRatio = dynamicSpread,
+            colorWarmthScore = warmthScore,
+            histogramBins = normalizedBins
+        )
+    }
+
+    /**
      * Generates an AI Post-Capture Auto-Edit & Mastering Recipe for a captured photo.
      * 1. First computes fast on-device luminance, shadow/highlight ratio, and RGB color-balance metrics.
      * 2. Requests multimodal Gemini 3.8 Flash mastering parameters (`autoEditGenerativeModel`),

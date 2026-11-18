@@ -383,8 +383,9 @@ class MediaGalleryRepository(private val context: Context) {
         onProgress: (Int) -> Unit = {}
     ): Pair<Uri?, Bitmap> = withContext(Dispatchers.Default) {
         try {
-            val effectiveMode = if (upscaleMode == AiUpscaleMode.UPSCALE_4X) {
-                AiUpscaleMode.UPSCALE_2X // Generated image is already 1024px+; 2x produces crisp 2048px+ UHD
+            val maxEdge = max(generatedBitmap.width, generatedBitmap.height)
+            val effectiveMode = if (maxEdge <= 1500 || upscaleMode == AiUpscaleMode.UPSCALE_4X) {
+                AiUpscaleMode.UPSCALE_4X // 1024px * 4x = 4096px True 4K UHD
             } else {
                 AiUpscaleMode.UPSCALE_2X
             }

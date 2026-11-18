@@ -217,4 +217,50 @@ class ExampleRobolectricTest {
         viewModel.closeGalleryToCamera()
         assertEquals(ActiveAppScreen.CAMERA_VIEWFINDER, viewModel.uiState.value.activeScreen)
     }
+
+    @Test
+    fun `resolveVideoQualityAndBitrate prioritizes UHD QualitySelector and higher bitrates when 4K 60fps is selected`() {
+        // 1. 4K / 60fps with a low 80 Mbps input should automatically prioritize higher bitrates (>= 250 Mbps floor)
+        // and place Quality.UHD + Quality.HIGHEST at the front of the QualitySelector order
+        val config4k60 = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.UHD_4K,
+            videoFps = com.example.model.VideoFpsSetting.FPS_60,
+            requestedBitrateMbps = 80
+        )
+        assertTrue(config4k60.is4k60HighDensityMode)
+        assertEquals(
+            listOf(
+                androidx.camera.video.Quality.UHD,
+                androidx.camera.video.Quality.HIGHEST,
+                androidx.camera.video.Quality.FHD,
+                androidx.camera.video.Quality.HD
+            ),
+            config4k60.prioritizedQualityOrder
+        )
+        assertTrue(config4k60.effectiveBitrateMbps >= com.example.data.CameraHardwareController.PRO_4K60_MIN_BITRATE_MBPS)
+        assertEquals(250_000_000, config4k60.targetEncodingBitrateBps)
+        assertTrue(config4k60.dataDensityBitsPerPixelFrame > 0.45f)
+
+        // 2. 4K / 60fps with 400 Mbps input boosts by 1.6x (640 Mbps) for pro-grade data density
+        val config4k60High = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.UHD_4K,
+            videoFps = com.example.model.VideoFpsSetting.FPS_60,
+            requestedBitrateMbps = 400
+        )
+        assertEquals(640, config4k60High.effectiveBitrateMbps)
+        assertEquals(640_000_000, config4k60High.targetEncodingBitrateBps)
+
+        // 3. 1080p / 30fps prioritizes Quality.FHD first and preserves standard bitrate without 4K60 boost
+        val config1080p30 = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.FHD_1080P,
+            videoFps = com.example.model.VideoFpsSetting.FPS_30,
+            requestedBitrateMbps = 80
+        )
+        assertFalse(config1080p30.is4k60HighDensityMode)
+        assertEquals(androidx.camera.video.Quality.FHD, config1080p30.prioritizedQualityOrder.first())
+        assertEquals(80, config1080p30.effectiveBitrateMbps)
+    }
 }

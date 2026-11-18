@@ -159,6 +159,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var focusDismissJob: Job? = null
     private var bannerDismissJob: Job? = null
     private var countdownJob: Job? = null
+    private var sceneSamplerJob: Job? = null
 
     private val realTimeAnalyzer = aiRepository.createRealTimeAnalyzer { metrics ->
         _uiState.update { it.copy(sceneMetrics = metrics) }
@@ -167,9 +168,31 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     init {
         appendDiagnosticLog(
             "INIT",
-            "Device=${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) | NR=FAST, EDGE=FAST"
+            "Device=${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) | 4K High-Res Stream Pipeline"
         )
         refreshGallery()
+    }
+
+    private fun startViewfinderSceneSampler() {
+        sceneSamplerJob?.cancel()
+        sceneSamplerJob = viewModelScope.launch {
+            while (true) {
+                delay(1200L)
+                val current = _uiState.value
+                if (current.activeScreen == ActiveAppScreen.CAMERA_VIEWFINDER &&
+                    current.hasCameraPermission &&
+                    !current.isCapturingPhoto
+                ) {
+                    val bmp = hardwareController.grabViewfinderBitmap()
+                    if (bmp != null) {
+                        val metrics = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            aiRepository.computeSceneMetricsFromBitmap(bmp)
+                        }
+                        _uiState.update { it.copy(sceneMetrics = metrics) }
+                    }
+                }
+            }
+        }
     }
 
     fun appendDiagnosticLog(tag: String, message: String) {
@@ -218,6 +241,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             lifecycleOwner = lifecycleOwner,
             previewView = previewView,
             isVideoMode = state.activeMode == CameraMode.VIDEO,
+            activeMode = state.activeMode,
             lensFacing = state.lensFacing,
             flashSetting = state.flashSetting,
             videoResolution = state.videoResolution,
@@ -234,6 +258,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { current ->
                     current.copy(extraHybridZoomFactor = extraScale)
                 }
+                startViewfinderSceneSampler()
             },
             onDiagnosticLog = { tag, msg ->
                 appendDiagnosticLog(tag, msg)
@@ -535,9 +560,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             VideoResolutionSetting.UHD_4K
         }
-        _uiState.update { it.copy(videoResolution = next) }
-        appendDiagnosticLog("VIDEO-RES", "Video resolution -> ${next.fullTitle}")
-        showStatusBanner("Video Resolution: ${next.fullTitle}")
+        val currentFps = _uiState.value.videoFps
+        val resolvedConfig = CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = next,
+            videoFps = currentFps,
+            requestedBitrateMbps = _uiState.value.videoBitrateMbps
+        )
+        _uiState.update {
+            it.copy(
+                videoResolution = next,
+                videoBitrateMbps = resolvedConfig.effectiveBitrateMbps
+            )
+        }
+        appendDiagnosticLog("VIDEO-RES", resolvedConfig.profileSummary)
+        showStatusBanner(
+            if (resolvedConfig.is4k60HighDensityMode) {
+                "4K 60fps Pro Quality: Prioritized ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
+            } else {
+                "Video Resolution: ${next.fullTitle} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
+            }
+        )
         bindCameraToLifecycle(lifecycleOwner, previewView)
     }
 
@@ -547,9 +590,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             VideoFpsSetting.FPS_60
         }
-        _uiState.update { it.copy(videoFps = next) }
-        appendDiagnosticLog("FPS", "Video frame rate -> ${next.label}")
-        showStatusBanner("Frame Rate: ${next.label}")
+        val currentRes = _uiState.value.videoResolution
+        val resolvedConfig = CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = currentRes,
+            videoFps = next,
+            requestedBitrateMbps = _uiState.value.videoBitrateMbps
+        )
+        _uiState.update {
+            it.copy(
+                videoFps = next,
+                videoBitrateMbps = resolvedConfig.effectiveBitrateMbps
+            )
+        }
+        appendDiagnosticLog("FPS", resolvedConfig.profileSummary)
+        showStatusBanner(
+            if (resolvedConfig.is4k60HighDensityMode) {
+                "4K 60fps Pro Quality: Prioritized ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
+            } else {
+                "Frame Rate: ${next.label} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
+            }
+        )
         bindCameraToLifecycle(lifecycleOwner, previewView)
     }
 

@@ -145,13 +145,13 @@ fun CameraViewfinderScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember {
         PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            // Hardware-accelerated SurfaceView (PERFORMANCE) avoids TextureView downscaling blur
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
 
-    val isVideoMode = state.activeMode == CameraMode.VIDEO
-    DisposableEffect(lifecycleOwner, state.hasCameraPermission, isVideoMode) {
+    DisposableEffect(lifecycleOwner, state.hasCameraPermission, state.activeMode) {
         viewModel.bindCameraToLifecycle(lifecycleOwner, previewView)
         onDispose { }
     }
@@ -357,14 +357,14 @@ fun CameraViewfinderScreen(
                 onOpenSettings = { viewModel.setShowSettingsDialog(true) }
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Second Quick Row: AI Upscale Toggle (Original / AI Upscale 2x / AI Upscale 4x) + Format + Bitrate + Logs + AI Coach
+            // Second Quick Row: Compact 4K Honor AI + Preset + Super-Res Upscale + Format + Bitrate + Logs + AI Coach
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (state.isRecordingVideo) {
@@ -377,65 +377,65 @@ fun CameraViewfinderScreen(
                     )
                 }
 
-                // Automatic Post-Capture Honor 600 AI Generation & Upscale Toggle Pill
+                // Compact Honor 600 4K AI Generation Toggle Pill
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(18.dp))
                         .background(
                             if (state.aiAutoEditAfterCaptureEnabled) AiCyan.copy(alpha = 0.22f) else ObsidianGlass
                         )
                         .border(
                             width = 1.dp,
                             color = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else DividerSubtle,
-                            shape = RoundedCornerShape(20.dp)
+                            shape = RoundedCornerShape(18.dp)
                         )
                         .clickable { viewModel.toggleAiAutoEditAfterCapture() }
                         .minimumInteractiveComponentSize()
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
                         .testTag("toggle_ai_auto_edit_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = "Honor 600 AI Generation After Capture",
+                        contentDescription = "Honor 600 4K AI Generation",
                         tint = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else TextSecondaryZinc,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier.size(13.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = if (state.aiAutoEditAfterCaptureEnabled) {
-                            "Honor AI Gen: ${state.selectedHonorAiPreset.badge}"
+                            "4K AI: ON"
                         } else {
-                            "Honor AI Gen: OFF"
+                            "4K AI: OFF"
                         },
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = if (state.aiAutoEditAfterCaptureEnabled) AiCyan else TextPrimaryWhite,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                // Honor 600 AIGC Style Cycler Pill (AIGC DETAIL / HARCOURT / AI HDR / AI NIGHT)
+                // Compact Honor 600 AIGC Style Cycler Pill (AIGC DETAIL / HARCOURT / AI HDR / AI NIGHT)
                 if (state.aiAutoEditAfterCaptureEnabled) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
+                            .clip(RoundedCornerShape(18.dp))
                             .background(ObsidianGlass)
-                            .border(1.dp, EmeraldOptimal.copy(alpha = 0.75f), RoundedCornerShape(20.dp))
+                            .border(1.dp, EmeraldOptimal.copy(alpha = 0.75f), RoundedCornerShape(18.dp))
                             .clickable {
                                 val presets = com.example.model.HonorAiGenPreset.entries
                                 val nextIdx = (presets.indexOf(state.selectedHonorAiPreset) + 1) % presets.size
                                 viewModel.selectHonorAiPreset(presets[nextIdx])
                             }
                             .minimumInteractiveComponentSize()
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
                             .testTag("cycle_honor_ai_preset_button")
                     ) {
                         Text(
-                            text = state.selectedHonorAiPreset.title,
-                            style = MaterialTheme.typography.labelMedium,
+                            text = state.selectedHonorAiPreset.badge,
+                            style = MaterialTheme.typography.labelSmall,
                             color = EmeraldOptimal,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
@@ -445,30 +445,30 @@ fun CameraViewfinderScreen(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(18.dp))
                         .background(
                             if (isUpscaleActive) EmeraldOptimal.copy(alpha = 0.20f) else ObsidianGlass
                         )
                         .border(
                             width = 1.dp,
                             color = if (isUpscaleActive) EmeraldOptimal else DividerSubtle,
-                            shape = RoundedCornerShape(20.dp)
+                            shape = RoundedCornerShape(18.dp)
                         )
                         .clickable { viewModel.cycleAiUpscaleMode() }
                         .minimumInteractiveComponentSize()
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
                         .testTag("toggle_ai_zoom_quality_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = "AI Upscale Mode",
                         tint = if (isUpscaleActive) EmeraldOptimal else TextSecondaryZinc,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier.size(13.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = state.aiUpscaleMode.uiLabel,
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = if (isUpscaleActive) EmeraldOptimal else TextPrimaryWhite,
                         fontWeight = FontWeight.Bold
                     )

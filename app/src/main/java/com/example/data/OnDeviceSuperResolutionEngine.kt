@@ -158,12 +158,13 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
                     Bitmap.createScaledBitmap(paddedTile, scaledPadW, scaledPadH, true)
                 }
 
-                // Step 2: Mild edge-preserving unsharp mask (threshold = 6)
-                // Avoids halos, oversharpening, and watercolor artifacts on foliage
+                // Step 2: Mild edge-preserving unsharp mask (threshold = 6) + Honor 600 Smart HDR Tone Mapping
+                // Avoids halos, oversharpening, and watercolor artifacts on foliage while recovering highlight/shadow detail
                 val sharpenedTile = applyMildUnsharpMask(
                     tile = upscaledTile,
                     amount = unsharpAmount,
-                    threshold = 6
+                    threshold = 6,
+                    enableSmartHdrToneMap = recipe != null
                 )
 
                 // Step 3: Copy only the non-overlapping interior region into the destination canvas
@@ -205,11 +206,14 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
     /**
      * Mild 3x3 luminance-guided unsharp mask with a noise floor threshold so flat areas
      * (sky, skin, shadows) are not noisy and foliage edges remain natural without halos.
+     * When `enableSmartHdrToneMap` is true, also performs Honor 600 Smart HDR Highlight Roll-Off
+     * (recovering blown highlights > 205) and Shadow Lift (lifting dark shadows < 55).
      */
     private fun applyMildUnsharpMask(
         tile: Bitmap,
         amount: Float,
-        threshold: Int
+        threshold: Int,
+        enableSmartHdrToneMap: Boolean = false
     ): Bitmap {
         val w = tile.width
         val h = tile.height
@@ -225,9 +229,28 @@ class OnDeviceSuperResolutionEngine(private val context: Context) {
             for (x in 1 until w - 1) {
                 val idx = rowOffset + x
                 val center = inPixels[idx]
-                val cr = (center shr 16) and 0xFF
-                val cg = (center shr 8) and 0xFF
-                val cb = center and 0xFF
+                var cr = (center shr 16) and 0xFF
+                var cg = (center shr 8) and 0xFF
+                var cb = center and 0xFF
+
+                if (enableSmartHdrToneMap) {
+                    val luma = (cr * 77 + cg * 150 + cb * 29) shr 8
+                    if (luma > 205) {
+                        // Smooth highlight shoulder roll-off to recover sky & sunlit foliage detail
+                        val excess = luma - 205
+                        val compressedLuma = 205 + ((excess * 32) / 50)
+                        val scale = compressedLuma.toFloat() / luma.coerceAtLeast(1).toFloat()
+                        cr = (cr * scale).roundToInt().coerceIn(0, 255)
+                        cg = (cg * scale).roundToInt().coerceIn(0, 255)
+                        cb = (cb * scale).roundToInt().coerceIn(0, 255)
+                    } else if (luma in 8..54) {
+                        // Gentle shadow recovery without amplifying black-level noise
+                        val lift = ((55 - luma) * 18) / 55
+                        cr = (cr + lift).coerceIn(0, 255)
+                        cg = (cg + lift).coerceIn(0, 255)
+                        cb = (cb + lift).coerceIn(0, 255)
+                    }
+                }
 
                 val top = inPixels[idx - w]
                 val bottom = inPixels[idx + w]
