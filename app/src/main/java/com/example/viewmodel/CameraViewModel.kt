@@ -98,6 +98,7 @@ data class CameraUiState(
     val videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG,
     // Step 3: Creative LUTs & watermarks are OFF by default (neutral color, no fake overlays)
     val creativeFiltersEnabled: Boolean = false,
+    val showLiveFilterBar: Boolean = false,
     val activeLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
     val lutIntensity: Float = 1.0f,
     val selectedLutCategory: LutCategory = LutCategory.ALL,
@@ -363,6 +364,29 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setShowLutLogSheet(visible: Boolean) {
         _uiState.update { it.copy(showLutLogSheet = visible, showQuickMenuPopup = false) }
+    }
+
+    fun toggleLiveFilterBar() {
+        val next = !_uiState.value.showLiveFilterBar
+        _uiState.update {
+            it.copy(
+                showLiveFilterBar = next,
+                creativeFiltersEnabled = if (next) true else it.creativeFiltersEnabled,
+                showQuickMenuPopup = false
+            )
+        }
+        if (next) {
+            showStatusBanner("Sony Creative Look & Pro Edit Filters Live Ribbon")
+        }
+    }
+
+    fun setShowLiveFilterBar(visible: Boolean) {
+        _uiState.update {
+            it.copy(
+                showLiveFilterBar = visible,
+                creativeFiltersEnabled = if (visible) true else it.creativeFiltersEnabled
+            )
+        }
     }
 
     fun setShowBitrateSheet(visible: Boolean) {
@@ -1553,6 +1577,26 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateEditWarmth(value: Float) {
         _uiState.update { it.copy(photoEditState = it.photoEditState.copy(warmth = value)) }
+    }
+
+    fun updateEditHighlights(value: Float) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(highlights = value.coerceIn(-100f, 100f))) }
+    }
+
+    fun updateEditShadows(value: Float) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(shadows = value.coerceIn(-100f, 100f))) }
+    }
+
+    fun updateEditClarity(value: Float) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(clarity = value.coerceIn(-100f, 100f))) }
+    }
+
+    fun updateEditFadeMatte(value: Float) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(fadeMatte = value.coerceIn(0f, 100f))) }
+    }
+
+    fun updateEditSharpness(value: Float) {
+        _uiState.update { it.copy(photoEditState = it.photoEditState.copy(sharpness = value.coerceIn(0f, 100f))) }
     }
 
     fun updateEditVignette(value: Float) {

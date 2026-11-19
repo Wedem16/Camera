@@ -478,6 +478,8 @@ enum class LogProfile(
 
 enum class LutCategory(val label: String) {
     ALL("ALL"),
+    SONY("SONY LOOK"),
+    PRO_EDIT("PRO EDITS"),
     FILM("FILM STOCK"),
     TRAVEL("TRAVEL"),
     CINEMA("CINEMA"),
@@ -485,7 +487,8 @@ enum class LutCategory(val label: String) {
 }
 
 /**
- * 24 Built-in Film, Travel, Cinema & Monochrome LUTs usable live on the viewfinder and in the Photo Studio.
+ * 40 Built-in Sony Alpha Creative Looks, Pro Edit Masters, Film Stock, Travel, Cinema & Monochrome LUTs
+ * usable live on the viewfinder and in the Photo Studio.
  */
 enum class PhotoFilterPreset(
     val label: String,
@@ -499,6 +502,26 @@ enum class PhotoFilterPreset(
     val bGain: Float = 1.0f
 ) {
     ORIGINAL("Original (No LUT)", LutCategory.ALL, 1.0f, 1.0f, 0f, 0f, 1.0f, 1.0f, 1.0f),
+
+    // Sony Alpha Creative Looks & Cinema Profiles (A7RV / FX3 / A1 II)
+    SONY_FL_FILM("Sony FL (Film Look)", LutCategory.SONY, 1.18f, 0.90f, 8f, -2f, 1.04f, 1.01f, 0.96f),
+    SONY_IN_MATTE("Sony IN (Instant Matte)", LutCategory.SONY, 0.88f, 0.84f, 10f, 14f, 1.03f, 1.01f, 0.94f),
+    SONY_PT_PORTRAIT("Sony PT (Portrait Skin)", LutCategory.SONY, 0.95f, 1.04f, 12f, 9f, 1.06f, 1.01f, 0.96f),
+    SONY_SH_HIGHKEY("Sony SH (Soft Highkey)", LutCategory.SONY, 0.90f, 1.06f, 6f, 18f, 1.04f, 1.03f, 1.01f),
+    SONY_VV2_VIVID("Sony VV2 (Vivid Pro)", LutCategory.SONY, 1.14f, 1.32f, 4f, 4f, 1.05f, 1.03f, 1.04f),
+    SONY_SCINETONE("Sony S-Cinetone FX3", LutCategory.SONY, 1.08f, 1.06f, 10f, 5f, 1.05f, 1.00f, 0.94f),
+    SONY_NT_NEUTRAL("Sony NT (Neutral Pro)", LutCategory.SONY, 0.96f, 0.92f, 0f, 3f, 1.00f, 1.00f, 1.00f),
+    SONY_BW_ALPHA("Sony BW (Alpha Mono)", LutCategory.SONY, 1.28f, 0.0f, 0f, -2f, 1.04f, 1.04f, 1.04f),
+
+    // Pro Edit & Master Studio Color Grades
+    PRO_LEICA_CHROME("Leica Classic Chrome", LutCategory.PRO_EDIT, 1.20f, 0.86f, 6f, -3f, 1.04f, 0.99f, 0.95f),
+    PRO_HASSELBLAD_HNCS("Hasselblad HNCS Natural", LutCategory.PRO_EDIT, 1.07f, 1.10f, 8f, 4f, 1.04f, 1.01f, 0.97f),
+    PRO_HARCOURT_STUDIO("Harcourt Paris Sculpted", LutCategory.PRO_EDIT, 1.24f, 1.04f, 12f, -4f, 1.07f, 1.00f, 0.93f),
+    PRO_LIGHTROOM_GOLDEN("Pro Golden Hour Master", LutCategory.PRO_EDIT, 1.12f, 1.22f, 24f, 7f, 1.10f, 1.02f, 0.88f),
+    PRO_EDITORIAL_MATTE("Pro Editorial Matte", LutCategory.PRO_EDIT, 0.91f, 0.88f, 14f, 13f, 1.05f, 1.01f, 0.93f),
+    PRO_MOODY_EMERALD("Pro Moody Forest & Slate", LutCategory.PRO_EDIT, 1.16f, 0.86f, -10f, -5f, 0.93f, 1.05f, 1.03f),
+    PRO_COMMERCIAL_CRISP("Pro Commercial Studio", LutCategory.PRO_EDIT, 1.15f, 1.14f, -2f, 6f, 1.01f, 1.02f, 1.04f),
+    PRO_ANAMORPHIC_GOLD("Pro Anamorphic Teal/Gold", LutCategory.PRO_EDIT, 1.19f, 1.15f, -4f, -2f, 1.07f, 0.99f, 1.06f),
 
     // Film Stock LUTs
     KODAK_PORTRA_400("Kodak Portra 400", LutCategory.FILM, 1.06f, 1.12f, 14f, 6f, 1.05f, 1.01f, 0.94f),
@@ -806,6 +829,11 @@ data class PhotoEditState(
     val contrast: Float = 1.0f,
     val saturation: Float = 1.0f,
     val warmth: Float = 0f,
+    val highlights: Float = 0f,
+    val shadows: Float = 0f,
+    val clarity: Float = 0f,
+    val fadeMatte: Float = 0f,
+    val sharpness: Float = 0f,
     val vignette: Float = 0.0f,
     val rotationDegrees: Int = 0,
     val cropAspect: CropAspectPreset = CropAspectPreset.ORIGINAL,

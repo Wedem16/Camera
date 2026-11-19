@@ -119,6 +119,7 @@ import com.example.model.CameraMode
 import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
 import com.example.model.LogProfile
+import com.example.model.LutCategory
 import com.example.model.PhotoFilterPreset
 import com.example.model.ProCameraSettings
 import com.example.model.TimerSetting
@@ -758,43 +759,48 @@ fun CameraViewfinderScreen(
                     }
                 }
 
-                // Optional Creative LUT & Log Quick Pill
-                if (state.creativeFiltersEnabled) {
-                    val hasActiveLutOrLog = state.activeLut != PhotoFilterPreset.ORIGINAL ||
+                // Sony Creative Look & Pro Edit LUT Quick Pill (always visible for 1-tap access)
+                val hasActiveLutOrLog = state.creativeFiltersEnabled && (
+                    state.activeLut != PhotoFilterPreset.ORIGINAL ||
                         state.activeLogProfile != LogProfile.STANDARD_REC709
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(ObsidianGlass)
-                            .border(
-                                width = 1.dp,
-                                color = if (hasActiveLutOrLog) EmeraldOptimal else DividerSubtle,
-                                shape = RoundedCornerShape(20.dp)
-                            )
-                            .clickable { viewModel.setShowLutLogSheet(true) }
-                            .minimumInteractiveComponentSize()
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                            .testTag("open_lut_log_sheet_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ColorLens,
-                            contentDescription = "LUT & Log Profile",
-                            tint = if (hasActiveLutOrLog) EmeraldOptimal else AiCyan,
-                            modifier = Modifier.size(15.dp)
+                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(if (hasActiveLutOrLog) EmeraldOptimal.copy(alpha = 0.18f) else ObsidianGlass)
+                        .border(
+                            width = 1.dp,
+                            color = if (hasActiveLutOrLog) EmeraldOptimal else DividerSubtle,
+                            shape = RoundedCornerShape(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = if (state.activeLut == PhotoFilterPreset.ORIGINAL) {
-                                "LUT • ${state.activeLogProfile.shortCode}"
-                            } else {
-                                "${state.activeLut.label} • ${state.activeLogProfile.shortCode}"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (hasActiveLutOrLog) EmeraldOptimal else TextPrimaryWhite,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                        .clickable {
+                            if (!state.creativeFiltersEnabled) {
+                                viewModel.toggleCreativeFilters()
+                            }
+                            viewModel.setShowLutLogSheet(true)
+                        }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("open_lut_log_sheet_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ColorLens,
+                        contentDescription = "Sony Creative Look & Pro Edit LUTs",
+                        tint = if (hasActiveLutOrLog) EmeraldOptimal else GalaxyAmber,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (!hasActiveLutOrLog || state.activeLut == PhotoFilterPreset.ORIGINAL) {
+                            "SONY & PRO LUT"
+                        } else {
+                            "${state.activeLut.label} • ${state.activeLogProfile.shortCode}"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (hasActiveLutOrLog) EmeraldOptimal else TextPrimaryWhite,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 // Live Telemetry & Diagnostic Logs Toggle Pill
@@ -1014,6 +1020,21 @@ fun CameraViewfinderScreen(
                 else -> Unit
             }
 
+            // Live On-Screen Sony Creative Look & Pro Edit Filter Ribbon (when toggled ON)
+            AnimatedVisibility(
+                visible = state.showLiveFilterBar,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                LiveViewfinderFilterRibbon(
+                    state = state,
+                    onSelectCategory = viewModel::selectLutCategory,
+                    onSelectLut = viewModel::selectActiveLut,
+                    onOpenFullLutSheet = { viewModel.setShowLutLogSheet(true) },
+                    onCloseRibbon = { viewModel.setShowLiveFilterBar(false) }
+                )
+            }
+
             // Honor Floating Viewfinder Overlay Row (Left Bokeh/Beauty icons, Center Zoom Capsule, Right AI/LUT icons)
             HonorFloatingViewfinderRow(
                 state = state,
@@ -1033,10 +1054,7 @@ fun CameraViewfinderScreen(
                 },
                 onToggleAiScene = viewModel::toggleAiSceneOptimizer,
                 onOpenLutFrame = {
-                    if (!state.creativeFiltersEnabled) {
-                        viewModel.toggleCreativeFilters()
-                    }
-                    viewModel.setShowLutLogSheet(true)
+                    viewModel.toggleLiveFilterBar()
                 },
                 onSelectZoom = viewModel::setZoomRatio
             )
@@ -2245,3 +2263,138 @@ private fun PermissionOnboardingContent(
         }
     }
 }
+
+/**
+ * Floating Live Sony Creative Look & Pro Edit Filter Ribbon displayed right above the viewfinder zoom capsule.
+ * Lets users swipe across Sony FL/IN/PT/SH/VV2/S-Cinetone and Pro Edit Master LUTs in real time without leaving the viewfinder.
+ */
+@Composable
+private fun LiveViewfinderFilterRibbon(
+    state: CameraUiState,
+    onSelectCategory: (LutCategory) -> Unit,
+    onSelectLut: (PhotoFilterPreset) -> Unit,
+    onOpenFullLutSheet: () -> Unit,
+    onCloseRibbon: () -> Unit
+) {
+    val displayedPresets = remember(state.selectedLutCategory) {
+        if (state.selectedLutCategory == LutCategory.ALL) {
+            PhotoFilterPreset.entries
+        } else {
+            PhotoFilterPreset.entries.filter {
+                it == PhotoFilterPreset.ORIGINAL || it.category == state.selectedLutCategory
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(ObsidianGlass)
+            .border(1.dp, DividerSubtle, RoundedCornerShape(18.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .testTag("live_viewfinder_filter_ribbon")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LutCategory.entries.forEach { cat ->
+                val isSelected = state.selectedLutCategory == cat
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (isSelected) GalaxyAmber else ObsidianElevated)
+                        .clickable { onSelectCategory(cat) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .testTag("live_ribbon_cat_${cat.name.lowercase()}")
+                ) {
+                    Text(
+                        text = cat.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isSelected) AmoledBlack else TextPrimaryWhite
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(AiCyan.copy(alpha = 0.22f))
+                    .border(1.dp, AiCyan, CircleShape)
+                    .clickable(onClick = onOpenFullLutSheet)
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .testTag("live_ribbon_open_full_luts")
+            ) {
+                Text(
+                    text = "40 LUTs & Log",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = AiCyan
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(ObsidianElevated)
+                    .clickable(onClick = onCloseRibbon)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "Hide",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondaryZinc
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            displayedPresets.forEach { preset ->
+                val isSelected = state.activeLut == preset
+                val badgeAccent = when (preset.category) {
+                    LutCategory.SONY -> AiCyan
+                    LutCategory.PRO_EDIT -> EmeraldOptimal
+                    else -> GalaxyAmber
+                }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isSelected) badgeAccent else ObsidianElevated)
+                        .clickable { onSelectLut(preset) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("live_ribbon_lut_${preset.name.lowercase()}")
+                ) {
+                    Text(
+                        text = preset.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isSelected) AmoledBlack else TextPrimaryWhite,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = preset.category.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = if (isSelected) AmoledBlack.copy(alpha = 0.78f) else badgeAccent
+                    )
+                }
+            }
+        }
+    }
+}
+

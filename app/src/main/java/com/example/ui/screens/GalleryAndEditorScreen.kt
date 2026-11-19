@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
@@ -1257,9 +1259,47 @@ fun PhotoEditorScreen(
 
                 EditorToolTab.ADJUST -> {
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 225.dp)
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
+                        CompactEditorSlider(
+                            label = "HIGHLIGHTS",
+                            valueText = String.format(Locale.US, "%+.0f", editState.highlights),
+                            value = editState.highlights,
+                            range = -100f..100f,
+                            onValueChange = viewModel::updateEditHighlights
+                        )
+                        CompactEditorSlider(
+                            label = "SHADOWS",
+                            valueText = String.format(Locale.US, "%+.0f", editState.shadows),
+                            value = editState.shadows,
+                            range = -100f..100f,
+                            onValueChange = viewModel::updateEditShadows
+                        )
+                        CompactEditorSlider(
+                            label = "CLARITY",
+                            valueText = String.format(Locale.US, "%+.0f", editState.clarity),
+                            value = editState.clarity,
+                            range = -100f..100f,
+                            onValueChange = viewModel::updateEditClarity
+                        )
+                        CompactEditorSlider(
+                            label = "MATTE FADE",
+                            valueText = "${editState.fadeMatte.toInt()}%",
+                            value = editState.fadeMatte,
+                            range = 0f..100f,
+                            onValueChange = viewModel::updateEditFadeMatte
+                        )
+                        CompactEditorSlider(
+                            label = "SHARPNESS",
+                            valueText = "${editState.sharpness.toInt()}%",
+                            value = editState.sharpness,
+                            range = 0f..100f,
+                            onValueChange = viewModel::updateEditSharpness
+                        )
                         CompactEditorSlider(
                             label = "BRIGHTNESS",
                             valueText = String.format(Locale.US, "%+.0f", editState.brightness),
@@ -1387,7 +1427,7 @@ fun PhotoEditorScreen(
             ) {
                 EditorTabPill(
                     icon = Icons.Default.AutoFixHigh,
-                    label = "24 LUTS",
+                    label = "40 LUTS",
                     selected = activeToolTab == EditorToolTab.LUTS,
                     onClick = { activeToolTab = EditorToolTab.LUTS },
                     testTag = "editor_tab_filters"
@@ -1401,7 +1441,7 @@ fun PhotoEditorScreen(
                 )
                 EditorTabPill(
                     icon = Icons.Default.Tune,
-                    label = "ADJUST",
+                    label = "PRO EDIT",
                     selected = activeToolTab == EditorToolTab.ADJUST,
                     onClick = { activeToolTab = EditorToolTab.ADJUST },
                     testTag = "editor_tab_adjust"

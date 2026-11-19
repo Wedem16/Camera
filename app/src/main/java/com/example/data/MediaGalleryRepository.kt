@@ -591,7 +591,12 @@ class MediaGalleryRepository(private val context: Context) {
             extraContrast = editState.contrast,
             extraSaturation = editState.saturation,
             extraBrightness = editState.brightness,
-            extraWarmth = editState.warmth
+            extraWarmth = editState.warmth,
+            extraHighlights = editState.highlights,
+            extraShadows = editState.shadows,
+            extraClarity = editState.clarity,
+            extraFadeMatte = editState.fadeMatte,
+            extraSharpness = editState.sharpness
         )
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(colorMatrix)
@@ -1135,7 +1140,12 @@ class MediaGalleryRepository(private val context: Context) {
             extraContrast: Float = 1.0f,
             extraSaturation: Float = 1.0f,
             extraBrightness: Float = 0f,
-            extraWarmth: Float = 0f
+            extraWarmth: Float = 0f,
+            extraHighlights: Float = 0f,
+            extraShadows: Float = 0f,
+            extraClarity: Float = 0f,
+            extraFadeMatte: Float = 0f,
+            extraSharpness: Float = 0f
         ): ColorMatrix {
             val blend = lutIntensity.coerceIn(0f, 1f)
 
@@ -1147,9 +1157,33 @@ class MediaGalleryRepository(private val context: Context) {
             val gGain = 1.0f + (lut.gGain - 1.0f) * blend
             val bGain = 1.0f + (lut.bGain - 1.0f) * blend
 
-            val totalContrast = (lutContrast * logProfile.contrastFactor * extraContrast).coerceIn(0.35f, 2.4f)
-            val totalSaturation = (lutSat * logProfile.saturationFactor * extraSaturation).coerceIn(0f, 2.6f)
-            val totalBrightness = (lutBrightness + logProfile.shadowLift + extraBrightness).coerceIn(-100f, 100f)
+            // Pro Edit Tonal Math:
+            // - Clarity & Sharpness boost midtone contrast while mildly stabilizing saturation
+            // - Fade/Matte lifts the black floor (toe) while softening peak contrast
+            // - Highlights adjust upper slope gain; Shadows lift or deepen lower tonal offset
+            val clarityContrastBoost = 1.0f + (extraClarity / 100f) * 0.24f + (extraSharpness / 100f) * 0.12f
+            val fadeContrastDamp = 1.0f - (extraFadeMatte.coerceIn(0f, 100f) / 100f) * 0.16f
+            val highlightGainFactor = 1.0f + (extraHighlights / 100f) * 0.15f
+            val shadowLiftOffset = (extraShadows * 0.38f) + (extraFadeMatte.coerceIn(0f, 100f) * 0.28f)
+            val highlightTranslate = (extraHighlights * 0.18f)
+
+            val totalContrast = (
+                lutContrast *
+                    logProfile.contrastFactor *
+                    extraContrast *
+                    clarityContrastBoost *
+                    fadeContrastDamp *
+                    highlightGainFactor
+                ).coerceIn(0.35f, 2.5f)
+            val claritySatBoost = 1.0f + (extraClarity / 100f) * 0.06f - (extraFadeMatte.coerceIn(0f, 100f) / 100f) * 0.08f
+            val totalSaturation = (lutSat * logProfile.saturationFactor * extraSaturation * claritySatBoost).coerceIn(0f, 2.6f)
+            val totalBrightness = (
+                lutBrightness +
+                    logProfile.shadowLift +
+                    extraBrightness +
+                    shadowLiftOffset +
+                    highlightTranslate
+                ).coerceIn(-110f, 110f)
             val totalWarmth = (lutWarmth + logProfile.warmthOffset + extraWarmth).coerceIn(-70f, 70f)
 
             val cm = ColorMatrix()

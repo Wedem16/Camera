@@ -207,14 +207,48 @@ class ExampleRobolectricTest {
         assertEquals("1/250", pro.formattedShutter)
         assertEquals("4800K", pro.formattedWb)
 
-        // Opt-in creative filters toggle
+        // Opt-in creative filters & Sony Creative Look / Pro Edit LUTs
         viewModel.toggleCreativeFilters()
         assertTrue(viewModel.uiState.value.creativeFiltersEnabled)
-        viewModel.selectActiveLut(PhotoFilterPreset.KODAK_PORTRA_400)
-        assertEquals(PhotoFilterPreset.KODAK_PORTRA_400, viewModel.uiState.value.activeLut)
+        viewModel.selectActiveLut(PhotoFilterPreset.SONY_FL_FILM)
+        assertEquals(PhotoFilterPreset.SONY_FL_FILM, viewModel.uiState.value.activeLut)
+        assertEquals(com.example.model.LutCategory.SONY, viewModel.uiState.value.activeLut.category)
+        viewModel.selectActiveLut(PhotoFilterPreset.PRO_HARCOURT_STUDIO)
+        assertEquals(PhotoFilterPreset.PRO_HARCOURT_STUDIO, viewModel.uiState.value.activeLut)
+        assertEquals(com.example.model.LutCategory.PRO_EDIT, viewModel.uiState.value.activeLut.category)
+
+        // Toggle Live Viewfinder Filter Ribbon
+        viewModel.toggleLiveFilterBar()
+        assertTrue(viewModel.uiState.value.showLiveFilterBar)
+        viewModel.setShowLiveFilterBar(false)
+        assertFalse(viewModel.uiState.value.showLiveFilterBar)
+
         viewModel.toggleCreativeFilters()
         assertFalse(viewModel.uiState.value.creativeFiltersEnabled)
         assertEquals(PhotoFilterPreset.ORIGINAL, viewModel.uiState.value.activeLut)
+
+        // Pro Edit Sliders (Highlights, Shadows, Clarity, Matte Fade, Sharpness)
+        viewModel.updateEditHighlights(-24f)
+        viewModel.updateEditShadows(32f)
+        viewModel.updateEditClarity(40f)
+        viewModel.updateEditFadeMatte(18f)
+        viewModel.updateEditSharpness(25f)
+        assertEquals(-24f, viewModel.uiState.value.photoEditState.highlights, 0.01f)
+        assertEquals(32f, viewModel.uiState.value.photoEditState.shadows, 0.01f)
+        assertEquals(40f, viewModel.uiState.value.photoEditState.clarity, 0.01f)
+        assertEquals(18f, viewModel.uiState.value.photoEditState.fadeMatte, 0.01f)
+        assertEquals(25f, viewModel.uiState.value.photoEditState.sharpness, 0.01f)
+
+        val sonyProMatrix = com.example.data.MediaGalleryRepository.buildCombinedColorMatrix(
+            lut = PhotoFilterPreset.SONY_SCINETONE,
+            lutIntensity = 1.0f,
+            extraHighlights = -20f,
+            extraShadows = 30f,
+            extraClarity = 35f,
+            extraFadeMatte = 15f,
+            extraSharpness = 20f
+        )
+        assertTrue(sonyProMatrix.array[0] > 1.05f)
 
         // Gallery & Editor navigation
         assertEquals(TimerSetting.OFF, viewModel.uiState.value.timerSetting)
