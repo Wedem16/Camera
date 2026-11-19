@@ -41,6 +41,7 @@ import com.example.model.RealTimeSceneMetrics
 import com.example.model.TimerSetting
 import com.example.model.VideoFormatSetting
 import com.example.model.VideoFpsSetting
+import com.example.model.VideoHdrProfileSetting
 import com.example.model.VideoResolutionSetting
 import com.example.model.WhiteBalancePreset
 import com.example.model.ZoomOptimizationProfile
@@ -94,6 +95,7 @@ data class CameraUiState(
     val videoFormat: VideoFormatSetting = VideoFormatSetting.MP4_AVC,
     val videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
     val videoBitrateMbps: Int = 250,
+    val videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG,
     // Step 3: Creative LUTs & watermarks are OFF by default (neutral color, no fake overlays)
     val creativeFiltersEnabled: Boolean = false,
     val activeLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
@@ -260,7 +262,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private var lastLifecycleOwner: LifecycleOwner? = null
+    private var lastPreviewView: PreviewView? = null
+
     fun bindCameraToLifecycle(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        lastLifecycleOwner = lifecycleOwner
+        lastPreviewView = previewView
         val state = _uiState.value
         if (!state.hasCameraPermission) return
 
@@ -274,7 +281,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             videoResolution = state.videoResolution,
             videoFps = state.videoFps,
             videoBitrateMbps = state.videoBitrateMbps,
+            videoHdrProfile = state.videoHdrProfile,
             videoStabilizationEnabled = state.videoStabilizationEnabled,
+            requestedZoomRatio = state.currentZoomRatio,
             proSettings = state.proSettings,
             frameAnalyzer = realTimeAnalyzer,
             onHardwareInspected = { caps ->
@@ -405,6 +414,40 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         appendDiagnosticLog("LOG-CURVE", "Active Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
         showStatusBanner("Log Profile: ${profile.fullTitle} (${profile.dynamicRangeStops})")
+    }
+
+    // Video HDR & Cinema HDR Log Profile Selector (SDR / HDR10 / HDR LOG / HDR VIVID)
+    fun cycleVideoHdrProfile(
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
+        val entries = VideoHdrProfileSetting.entries
+        val currentIdx = entries.indexOf(_uiState.value.videoHdrProfile).coerceAtLeast(0)
+        val next = entries[(currentIdx + 1) % entries.size]
+        selectVideoHdrProfile(next, lifecycleOwner, previewView)
+    }
+
+    fun selectVideoHdrProfile(
+        profile: VideoHdrProfileSetting,
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
+        _uiState.update {
+            it.copy(
+                videoHdrProfile = profile,
+                activeLogProfile = if (profile.isLogCurve) profile.associatedLogProfile else it.activeLogProfile
+            )
+        }
+        appendDiagnosticLog(
+            "VID-HDR",
+            "Video HDR Profile -> ${profile.fullTitle} (${profile.dynamicRangeStops})"
+        )
+        showStatusBanner("${profile.badgeLabel}: ${profile.fullTitle} (${profile.dynamicRangeStops})")
+        val owner = lifecycleOwner ?: lastLifecycleOwner
+        val view = previewView ?: lastPreviewView
+        if (owner != null && view != null && _uiState.value.isVideoStreamMode && !_uiState.value.isRecordingVideo) {
+            bindCameraToLifecycle(owner, view)
+        }
     }
 
     // Photo & Video Formats (JPG, RAW+JPG .dng, PNG, WEBP / MP4, HEVC MP4, RAW MOV, RAW MKV)
@@ -839,9 +882,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setZoomRatio(ratio: Float, isContinuousGesture: Boolean) {
         val effective = ratio.coerceIn(0.6f, 10.0f)
-        if (isContinuousGesture && kotlin.math.abs(effective - _uiState.value.currentZoomRatio) < 0.015f) {
+        if (isContinuousGesture && kotlin.math.abs(effective - _uiState.value.currentZoomRatio) < 0.008f) {
             return
         }
+
+        // If switching into or out of 0.7x Ultra-Wide on a device that exposes the ultra-wide lens as a standalone Camera2 ID,
+        // rebind smoothly to the ultra-wide / main camera ID
+        val needsUwRebind = !isContinuousGesture &&
+            !_uiState.value.isRecordingVideo &&
+            hardwareController.needsStandaloneUltraWideRebind(effective)
+
         val extraScale = hardwareController.setZoomRatio(effective)
         val caps = _uiState.value.hardwareCapabilities
         val profile = ZoomOptimizationProfile.fromZoomRatio(effective)
@@ -852,25 +902,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
+        if (needsUwRebind) {
+            val owner = lastLifecycleOwner
+            val view = lastPreviewView
+            if (owner != null && view != null) {
+                bindCameraToLifecycle(owner, view)
+            }
+        }
+
         if (!isContinuousGesture) {
             val lensRoutingNote = when {
                 effective > 2.0f && caps.telephotoPhysicalCameraId != null ->
                     "Physical Telephoto Lens (ID ${caps.telephotoPhysicalCameraId})"
                 effective > 2.0f ->
-                    "Optical/HAL Zoom (${String.format(Locale.US, "%.1fx", effective.coerceIn(caps.sensorMinZoomRatio, caps.sensorMaxZoomRatio))}, no center-crop upscale)"
+                    "Optical/HAL Zoom (${String.format(Locale.US, "%.1fx", effective.coerceIn(caps.sensorMinZoomRatio, caps.sensorMaxZoomRatio))})"
                 effective < 1.0f && caps.supportsUltraWideOptical ->
-                    "Physical Ultra-Wide Lens"
+                    "0.7x Physical Ultra-Wide Optical Lens"
                 effective < 1.0f ->
-                    "1.0x Wide Native (0.6x physical UW not exposed to third-party apps)"
+                    "0.7x Ultra-Wide Expanded Field-of-View (${String.format(Locale.US, "%.1fx", effective)})"
                 else ->
-                    "Main Wide Native Sensor"
+                    "Main Wide Native Sensor (1.0x)"
             }
 
             appendDiagnosticLog(
                 "ZOOM",
                 "${profile.badgeLabel} -> $lensRoutingNote"
             )
-            if (effective in listOf(0.6f, 1.0f, 1.5f, 2.0f, 3.0f, 5.0f, 10.0f)) {
+            if (effective in listOf(0.6f, 0.7f, 1.0f, 1.5f, 2.0f, 3.0f, 5.0f, 10.0f)) {
                 showStatusBanner("${profile.badgeLabel}: $lensRoutingNote")
             }
         }

@@ -61,16 +61,24 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -123,6 +131,9 @@ fun GalleryScreen(
     BackHandler(onBack = onBackToCamera)
 
     val selected = state.selectedMediaItem
+    var splitCompareEnabled by remember { mutableStateOf(false) }
+    var splitFraction by remember { mutableFloatStateOf(0.5f) }
+    var detailZoomMultiplier by remember { mutableFloatStateOf(1.0f) }
 
     Column(
         modifier = Modifier
@@ -185,7 +196,7 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Sample Shot",
+                    text = "Sample Trio",
                     style = MaterialTheme.typography.labelMedium,
                     color = GalaxyAmber,
                     maxLines = 1,
@@ -221,7 +232,7 @@ fun GalleryScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Captured photos are saved unchanged to Pictures/Camera/ as Original JPEG, plus a separate _AI2x.jpg or _AI4x.jpg file when AI Upscale is enabled.",
+                    text = "Tap 'Load Sample Trio' to generate an Original JPEG (~0.8 MB), a 14-Bit Linear RAW DNG (~7.2 MB), and an Honor MagicLM 2x AI Master (~5.4 MB) for live side-by-side comparison.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondaryZinc
                 )
@@ -241,16 +252,44 @@ fun GalleryScreen(
                         onClick = onImportSamplePhoto,
                         modifier = Modifier.testTag("empty_gallery_load_sample")
                     ) {
-                        Text("Load Sample Shot", color = GalaxyAmber)
+                        Text("Load Sample Trio", color = GalaxyAmber)
                     }
                 }
             }
         } else {
+            // Find matching ORIGINAL item for Before/After comparison
+            val baseStem = remember(selected.displayName) {
+                selected.displayName
+                    .substringBefore("_AI_EDIT")
+                    .substringBefore("_AI2x")
+                    .substringBefore("_AI4x")
+                    .substringBefore("_HONOR_AI")
+                    .substringBefore("_RAW")
+                    .substringBefore("_ORIG")
+                    .substringBefore(".")
+            }
+            val pairedOriginalItem = remember(selected, state.mediaList) {
+                state.mediaList.firstOrNull { item ->
+                    !item.isVideo &&
+                        item.variantBadge == "ORIGINAL" &&
+                        item.displayName.startsWith(baseStem)
+                } ?: state.mediaList.firstOrNull { !it.isVideo && it.variantBadge == "ORIGINAL" }
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(12.dp),
+                    .padding(12.dp)
+                    .pointerInput(splitCompareEnabled) {
+                        if (splitCompareEnabled) {
+                            detectHorizontalDragGestures { change, _ ->
+                                change.consume()
+                                val w = size.width.coerceAtLeast(1)
+                                splitFraction = (change.position.x / w.toFloat()).coerceIn(0.08f, 0.92f)
+                            }
+                        }
+                    },
                 contentAlignment = Alignment.Center
             ) {
                 if (selected.isVideo) {
@@ -276,6 +315,7 @@ fun GalleryScreen(
                             .clip(RoundedCornerShape(20.dp))
                     )
                 } else {
+                    // Main Photo (or Right Side in Split Compare)
                     AsyncImage(
                         model = selected.uri,
                         contentDescription = selected.displayName,
@@ -283,11 +323,85 @@ fun GalleryScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .clip(RoundedCornerShape(20.dp))
+                            .graphicsLayer {
+                                scaleX = detailZoomMultiplier
+                                scaleY = detailZoomMultiplier
+                            }
                     )
+
+                    // Left Side Overlay when Split Compare is active
+                    if (splitCompareEnabled) {
+                        val beforeUri = pairedOriginalItem?.uri ?: selected.uri
+                        val isSameFileFallback = pairedOriginalItem == null || pairedOriginalItem.id == selected.id
+                        val fallbackFlatFilter = remember(isSameFileFallback) {
+                            if (isSameFileFallback) {
+                                val cm = ColorMatrix().apply { setToSaturation(0.75f) }
+                                ColorFilter.colorMatrix(cm)
+                            } else {
+                                null
+                            }
+                        }
+
+                        AsyncImage(
+                            model = beforeUri,
+                            contentDescription = "Original Before Comparison",
+                            contentScale = ContentScale.Fit,
+                            colorFilter = fallbackFlatFilter,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(20.dp))
+                                .graphicsLayer {
+                                    scaleX = detailZoomMultiplier
+                                    scaleY = detailZoomMultiplier
+                                }
+                                .drawWithContent {
+                                    clipRect(
+                                        left = 0f,
+                                        top = 0f,
+                                        right = size.width * splitFraction,
+                                        bottom = size.height
+                                    ) {
+                                        this@drawWithContent.drawContent()
+                                    }
+                                    val splitX = size.width * splitFraction
+                                    drawLine(
+                                        color = GalaxyAmber,
+                                        start = androidx.compose.ui.geometry.Offset(splitX, 0f),
+                                        end = androidx.compose.ui.geometry.Offset(splitX, size.height),
+                                        strokeWidth = 3.dp.toPx()
+                                    )
+                                    drawCircle(
+                                        color = GalaxyAmber,
+                                        radius = 14.dp.toPx(),
+                                        center = androidx.compose.ui.geometry.Offset(splitX, size.height * 0.5f)
+                                    )
+                                }
+                        )
+                    }
                 }
 
-                // File Info + ORIGINAL vs HONOR AI GEN / AI EDIT / AI UPSCALE 2x / 4x Variant Badge
+                // File Info + ORIGINAL vs HONOR AI GEN / AI EDIT / RAW DNG Variant Badge
                 val isAiUpscaled = selected.variantBadge.startsWith("AI") || selected.variantBadge.startsWith("HONOR AI")
+                val isRawDng = selected.variantBadge == "RAW DNG"
+                val badgeColor = when {
+                    isAiUpscaled -> EmeraldOptimal
+                    isRawDng -> AiCyan
+                    else -> GalaxyAmber
+                }
+                val sizeDeltaLabel = remember(selected, pairedOriginalItem) {
+                    val origBytes = pairedOriginalItem?.sizeBytes ?: 0L
+                    if (origBytes > 0L && selected.id != pairedOriginalItem?.id && selected.sizeBytes > origBytes) {
+                        val mult = selected.sizeBytes.toFloat() / origBytes.toFloat()
+                        String.format(Locale.US, " • %.1f× Bigger than Original (%s)", mult, pairedOriginalItem?.formattedSize ?: "")
+                    } else if (isRawDng) {
+                        " • 14-Bit Linear Sensor DNG Master"
+                    } else if (isAiUpscaled) {
+                        " • Honor MagicLM Neural SR + 64³ 3D LUT"
+                    } else {
+                        " • Standard 8-Bit Native JPEG"
+                    }
+                }
+
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -296,7 +410,7 @@ fun GalleryScreen(
                         .background(ObsidianGlass)
                         .border(
                             width = 1.dp,
-                            color = if (isAiUpscaled) EmeraldOptimal else DividerSubtle,
+                            color = badgeColor,
                             shape = RoundedCornerShape(14.dp)
                         )
                         .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -306,7 +420,7 @@ fun GalleryScreen(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (isAiUpscaled) EmeraldOptimal else GalaxyAmber)
+                            .background(badgeColor)
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
@@ -325,10 +439,63 @@ fun GalleryScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${selected.formattedResolution} • ${selected.formattedSize}",
+                            text = "${selected.formattedResolution} • ${selected.formattedSize}$sizeDeltaLabel",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isAiUpscaled) EmeraldOptimal else GalaxyAmber
+                            color = badgeColor
                         )
+                    }
+                }
+
+                // Bottom Overlay Controls: Split Compare (Before/After) + 4x Detail Zoom Loupe
+                if (!selected.isVideo) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(AmoledBlack.copy(alpha = 0.82f))
+                            .border(1.dp, DividerSubtle, RoundedCornerShape(20.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (splitCompareEnabled) GalaxyAmber else ObsidianElevated)
+                                .clickable { splitCompareEnabled = !splitCompareEnabled }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .testTag("gallery_split_compare_toggle")
+                        ) {
+                            Text(
+                                text = if (splitCompareEnabled) "◄ Split Compare ON ►" else "Compare vs Original",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (splitCompareEnabled) AmoledBlack else TextPrimaryWhite,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (detailZoomMultiplier > 1.05f) EmeraldOptimal else ObsidianElevated)
+                                .clickable {
+                                    detailZoomMultiplier = when {
+                                        detailZoomMultiplier < 1.5f -> 2.5f
+                                        detailZoomMultiplier < 3.2f -> 4.0f
+                                        else -> 1.0f
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .testTag("gallery_detail_zoom_toggle")
+                        ) {
+                            Text(
+                                text = if (detailZoomMultiplier <= 1.05f) "1x Fit (Tap for 4x Detail)" else "${String.format(Locale.US, "%.1fx", detailZoomMultiplier)} Pixel Zoom",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (detailZoomMultiplier > 1.05f) AmoledBlack else TextPrimaryWhite,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -343,15 +510,17 @@ fun GalleryScreen(
                 items(state.mediaList, key = { "${it.isVideo}_${it.id}" }) { item ->
                     val isCurrent = item.id == selected.id && item.isVideo == selected.isVideo
                     val isItemAi = item.variantBadge.startsWith("AI") || item.variantBadge.startsWith("HONOR AI")
+                    val isItemRaw = item.variantBadge == "RAW DNG"
                     Box(
                         modifier = Modifier
-                            .size(72.dp)
+                            .size(74.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .border(
                                 width = if (isCurrent) 2.5.dp else 1.dp,
                                 color = when {
                                     isCurrent -> GalaxyAmber
-                                    isItemAi -> EmeraldOptimal.copy(alpha = 0.7f)
+                                    isItemAi -> EmeraldOptimal.copy(alpha = 0.8f)
+                                    isItemRaw -> AiCyan.copy(alpha = 0.8f)
                                     else -> DividerSubtle
                                 },
                                 shape = RoundedCornerShape(12.dp)
@@ -365,6 +534,27 @@ fun GalleryScreen(
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
+                        // Top-right MB size pill on each thumbnail
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(3.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(AmoledBlack.copy(alpha = 0.78f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = item.formattedSize,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 7.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when {
+                                    isItemAi -> EmeraldOptimal
+                                    isItemRaw -> AiCyan
+                                    else -> GalaxyAmber
+                                }
+                            )
+                        }
                         if (item.isVideo) {
                             Icon(
                                 imageVector = Icons.Default.PlayCircleFilled,
@@ -375,12 +565,12 @@ fun GalleryScreen(
                                     .size(24.dp)
                             )
                         }
-                        // Label badge at bottom of each thumbnail ("ORIGINAL", "AI UPSCALE 2x", "AI UPSCALE 4x")
+                        // Label badge at bottom of each thumbnail ("ORIGINAL", "RAW DNG", "AI EDIT + 2x")
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
-                                .background(AmoledBlack.copy(alpha = 0.78f))
+                                .background(AmoledBlack.copy(alpha = 0.82f))
                                 .padding(vertical = 2.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -389,7 +579,11 @@ fun GalleryScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 fontSize = 8.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isItemAi) EmeraldOptimal else TextPrimaryWhite,
+                                color = when {
+                                    isItemAi -> EmeraldOptimal
+                                    isItemRaw -> AiCyan
+                                    else -> TextPrimaryWhite
+                                },
                                 maxLines = 1
                             )
                         }

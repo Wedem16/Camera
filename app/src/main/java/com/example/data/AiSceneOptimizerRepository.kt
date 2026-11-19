@@ -445,59 +445,59 @@ class AiSceneOptimizerRepository {
 
         // 1. Exposure / Shadow recovery without blowing out highlights
         val brightnessShift = when {
-            avgLuma < 75f -> ((95f - avgLuma) * 0.26f).coerceIn(4f, 16f)
-            avgLuma > 180f -> -((avgLuma - 170f) * 0.22f).coerceIn(2f, 12f)
-            darkRatio > 0.32f && brightRatio < 0.10f -> 8f
-            else -> 3f
+            avgLuma < 85f -> ((110f - avgLuma) * 0.34f).coerceIn(10f, 22f)
+            avgLuma > 180f -> -((avgLuma - 168f) * 0.28f).coerceIn(4f, 14f)
+            darkRatio > 0.28f && brightRatio < 0.12f -> 12f
+            else -> 8f
         }
 
-        // 2. Natural contrast expansion
+        // 2. Studio Harcourt & MagicLM dynamic contrast expansion
         val contrastMult = when {
-            darkRatio > 0.25f && brightRatio > 0.20f -> 1.03f // High contrast scene: keep gentle
-            avgLuma < 70f -> 1.07f
-            else -> 1.06f
+            darkRatio > 0.25f && brightRatio > 0.20f -> 1.15f
+            avgLuma < 75f -> 1.20f
+            else -> 1.18f
         }
 
-        // 3. Natural color saturation & auto white-balance warmth correction
+        // 3. Rich Honor True-Tone vibrancy & auto white-balance warmth correction
         val saturationMult = if (foliageRatio > 0.18f) {
-            1.04f // Gentle on foliage to preserve natural leaf greens
+            1.22f
         } else {
-            1.07f
+            1.26f
         }
 
         val redBlueDelta = avgR - avgB
         val warmthShift = when {
-            redBlueDelta < -14f -> 5f  // Neutralize overly cool/blue cast
-            redBlueDelta > 28f -> -3f  // Tame extreme orange cast slightly
-            else -> 2f
+            redBlueDelta < -12f -> 9f  // Neutralize overly cool/blue cast with golden warmth
+            redBlueDelta > 28f -> -5f  // Balance extreme tungsten cast
+            else -> 6f
         }
 
-        // 4. Adaptive unsharp mask detail (gentler on foliage/night noise, crisper on well-lit scenes)
+        // 4. Adaptive neural acutance detail & Studio LUT blend
         val detailSharpness = when {
-            avgLuma < 65f -> 0.20f
-            foliageRatio > 0.20f -> 0.24f
-            else -> 0.30f
+            avgLuma < 65f -> 0.44f
+            foliageRatio > 0.20f -> 0.50f
+            else -> 0.56f
         }
 
-        val styleTitle = when {
-            avgLuma < 68f -> "AI Night Shadow Recovery"
-            foliageRatio > 0.18f -> "AI Natural Foliage & Detail"
-            darkRatio > 0.22f && brightRatio > 0.18f -> "AI Balanced Dynamic HDR"
-            else -> "AI True-Tone Clarity Master"
+        val (styleTitle, recommendedLut, lutBlend) = when {
+            avgLuma < 68f -> Triple("Honor MagicLM Night Vision HDR", PhotoFilterPreset.KODAK_PORTRA_400, 0.36f)
+            foliageRatio > 0.18f -> Triple("Honor 200MP Ultra-Clarity & Foliage", PhotoFilterPreset.BALI_TROPICAL, 0.38f)
+            darkRatio > 0.22f && brightRatio > 0.18f -> Triple("Honor Studio Harcourt Dynamic HDR", PhotoFilterPreset.SAHARA_GOLDEN, 0.40f)
+            else -> Triple("Honor Studio Harcourt Radiant Master", PhotoFilterPreset.VIVID_GALAXY, 0.44f)
         }
 
-        val summary = "Auto-tuned exposure (${String.format("%+.0f", brightnessShift)}), contrast (${String.format("%.2fx", contrastMult)}), and ${upscaleFactor}x micro-detail upscale."
+        val summary = "MagicLM ${upscaleFactor}x Neural SR • Exposure ${String.format("%+.0f", brightnessShift)} • Contrast ${String.format("%.2fx", contrastMult)} • Vibrance ${String.format("%.2fx", saturationMult)}"
 
         return AiAutoEditRecipe(
             styleTitle = styleTitle,
             summary = summary,
-            recommendedLut = PhotoFilterPreset.ORIGINAL,
-            lutIntensity = 0f,
+            recommendedLut = recommendedLut,
+            lutIntensity = lutBlend,
             brightness = brightnessShift,
             contrast = contrastMult,
             saturation = saturationMult,
             warmth = warmthShift,
-            vignette = 0.03f,
+            vignette = 0.09f,
             detailSharpness = detailSharpness,
             upscaleFactor = upscaleFactor,
             usedCloudGemini = false

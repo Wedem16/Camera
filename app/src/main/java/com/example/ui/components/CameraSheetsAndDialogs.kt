@@ -115,6 +115,7 @@ import com.example.model.GeminiSceneCritique
 import com.example.model.LogProfile
 import com.example.model.LutCategory
 import com.example.model.PhotoFilterPreset
+import com.example.model.VideoHdrProfileSetting
 import com.example.ui.theme.AiCyan
 import com.example.ui.theme.AiViolet
 import com.example.ui.theme.AmoledBlack
@@ -140,7 +141,7 @@ private val HonorQuickCircleBg = Color(0xFF3A3A3C)
  * Native Honor Camera Frosted Quick Menu Popup Card (`Screenshot_20261118_144502`).
  * Features a floating Settings gear button above the top-right corner, a collapse chevron at top center,
  * and a 4-column grid of circular quick-action toggles (Flash, Specifications, Ratio, Audio, Filters,
- * Gridlines, Level, 4K AI SR).
+ * Gridlines, Level, 4K AI SR / Video HDR Log).
  */
 @Composable
 fun HonorQuickMenuPopupCard(
@@ -266,7 +267,7 @@ fun HonorQuickMenuPopupCard(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Row 2: Filters, Gridlines, Level, 4K AI SR
+            // Row 2: Filters, Gridlines, Level, 4K AI SR (or Video HDR / HDR Log in Video Mode)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -298,14 +299,25 @@ fun HonorQuickMenuPopupCard(
                     testTag = "quick_menu_level"
                 )
 
-                QuickMenuCircleItem(
-                    icon = Icons.Default.AutoAwesome,
-                    badgeText = if (state.aiUpscaleMode == AiUpscaleMode.ORIGINAL) null else "${state.aiUpscaleMode.scaleFactor}x",
-                    label = state.aiUpscaleMode.uiLabel,
-                    isActive = state.aiUpscaleMode != AiUpscaleMode.ORIGINAL,
-                    onClick = onCycleAiUpscale,
-                    testTag = "quick_menu_ai_sr"
-                )
+                if (state.isVideoStreamMode) {
+                    QuickMenuCircleItem(
+                        icon = Icons.Default.HdrOn,
+                        badgeText = state.videoHdrProfile.badgeLabel,
+                        label = "HDR / Log",
+                        isActive = state.videoHdrProfile != VideoHdrProfileSetting.SDR_REC709,
+                        onClick = onCycleAiUpscale,
+                        testTag = "quick_menu_ai_sr"
+                    )
+                } else {
+                    QuickMenuCircleItem(
+                        icon = Icons.Default.AutoAwesome,
+                        badgeText = if (state.aiUpscaleMode == AiUpscaleMode.ORIGINAL) null else "${state.aiUpscaleMode.scaleFactor}x",
+                        label = state.aiUpscaleMode.uiLabel,
+                        isActive = state.aiUpscaleMode != AiUpscaleMode.ORIGINAL,
+                        onClick = onCycleAiUpscale,
+                        testTag = "quick_menu_ai_sr"
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -382,6 +394,7 @@ fun LutAndLogBottomSheet(
     onSelectLut: (PhotoFilterPreset) -> Unit,
     onUpdateIntensity: (Float) -> Unit,
     onSelectLogProfile: (LogProfile) -> Unit,
+    onSelectVideoHdrProfile: (VideoHdrProfileSetting) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -428,12 +441,12 @@ fun LutAndLogBottomSheet(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "HONOR CREATIVE LUTS & LOGS",
+                            text = "HONOR CREATIVE LUTS & HDR LOG",
                             style = MaterialTheme.typography.labelLarge,
                             color = GalaxyAmber
                         )
                         Text(
-                            text = "Default is Neutral (Off) • Opt-in Film & Travel Color Looks",
+                            text = "10-Bit Video HDR / Magic-Log & Film Color Looks",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondaryZinc
                         )
@@ -445,6 +458,75 @@ fun LutAndLogBottomSheet(
                         contentDescription = "Close LUT & Log Sheet",
                         tint = TextPrimaryWhite
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Video HDR & Cinema HDR Log Profile Selector Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "VIDEO HDR & MAGIC-LOG PROFILE (${state.videoHdrProfile.badgeLabel})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = GalaxyAmber
+                )
+                Text(
+                    text = state.videoHdrProfile.dynamicRangeStops,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = EmeraldOptimal
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                VideoHdrProfileSetting.entries.forEach { hdrProfile ->
+                    val selected = state.videoHdrProfile == hdrProfile
+                    val accent = if (hdrProfile.isLogCurve) AiCyan else GalaxyAmber
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (selected) accent.copy(alpha = 0.2f) else ObsidianElevated)
+                            .border(
+                                width = 1.dp,
+                                color = if (selected) accent else DividerSubtle,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onSelectVideoHdrProfile(hdrProfile) }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("video_hdr_profile_${hdrProfile.name.lowercase()}")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = hdrProfile.badgeLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (selected) accent else TextPrimaryWhite
+                            )
+                            Text(
+                                text = hdrProfile.dynamicRangeStops,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = EmeraldOptimal
+                            )
+                        }
+                        Text(
+                            text = hdrProfile.fullTitle,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondaryZinc
+                        )
+                    }
                 }
             }
 
@@ -1306,6 +1388,7 @@ fun CameraSettingsDialog(
     onToggleKeepOriginalWithAiEnhance: () -> Unit = {},
     onToggleVideoResolution: () -> Unit,
     onCycleVideoFormat: () -> Unit,
+    onCycleVideoHdrProfile: () -> Unit = {},
     onToggleVideoFps: () -> Unit,
     onToggleAutoFpsLowLight: () -> Unit = {},
     onToggleLockWhiteBalanceInVideo: () -> Unit = {},
@@ -1532,6 +1615,15 @@ fun CameraSettingsDialog(
                         valueText = videoSpecText,
                         onClick = onToggleVideoResolution,
                         testTag = "setting_video_resolution"
+                    )
+                    HonorSettingDivider()
+                    HonorChevronSettingRow(
+                        icon = Icons.Default.HdrOn,
+                        title = "Video HDR & Magic-Log Profile",
+                        subtitle = "${state.videoHdrProfile.fullTitle} (${state.videoHdrProfile.dynamicRangeStops})",
+                        valueText = state.videoHdrProfile.badgeLabel,
+                        onClick = onCycleVideoHdrProfile,
+                        testTag = "setting_video_hdr_profile"
                     )
                     HonorSettingDivider()
                     HonorChevronSettingRow(

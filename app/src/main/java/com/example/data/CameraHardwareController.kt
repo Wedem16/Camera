@@ -58,6 +58,7 @@ import com.example.model.HardwareCapabilities
 import com.example.model.ProCameraSettings
 import com.example.model.VideoFormatSetting
 import com.example.model.VideoFpsSetting
+import com.example.model.VideoHdrProfileSetting
 import com.example.model.VideoResolutionSetting
 import com.example.model.WhiteBalancePreset
 import java.text.SimpleDateFormat
@@ -80,7 +81,10 @@ class CameraHardwareController(private val context: Context) {
     private var boundPreviewView: PreviewView? = null
     private var lastInspectedCapabilities: HardwareCapabilities = HardwareCapabilities()
     private var lastAppliedHardwareZoom: Float = -1f
+    private var lastHardwareZoomCallMs: Long = 0L
     private var lastBoundIsVideoOrNight: Boolean = false
+    private var standaloneUltraWideCameraId: String? = null
+    private var boundUsingStandaloneUltraWide: Boolean = false
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
@@ -165,6 +169,36 @@ class CameraHardwareController(private val context: Context) {
         }
     }
 
+    /**
+     * Scans Camera2 CameraManager for a standalone ultra-wide back camera (`focalLength < primaryFocal * 0.88f`)
+     * so devices that expose the 0.7x/0.6x ultra-wide lens as a separate Camera2 ID can bind directly to it.
+     */
+    private fun findStandaloneUltraWideBackCameraId(): String? {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                ?: return null
+            var primaryBackFocal: Float? = null
+            val backCameras = mutableListOf<Pair<String, Float>>()
+            for (camId in cameraManager.cameraIdList) {
+                val chars = runCatching { cameraManager.getCameraCharacteristics(camId) }.getOrNull() ?: continue
+                if (chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) {
+                    val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+                    if (focal != null && focal > 0.5f) {
+                        if (primaryBackFocal == null) primaryBackFocal = focal
+                        backCameras.add(camId to focal)
+                    }
+                }
+            }
+            val refFocal = primaryBackFocal ?: return null
+            backCameras
+                .filter { (_, focal) -> focal < refFocal * 0.88f }
+                .minByOrNull { it.second }
+                ?.first
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun bindCamera(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
@@ -175,7 +209,9 @@ class CameraHardwareController(private val context: Context) {
         videoResolution: VideoResolutionSetting,
         videoFps: VideoFpsSetting,
         videoBitrateMbps: Int,
+        videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG,
         videoStabilizationEnabled: Boolean,
+        requestedZoomRatio: Float = 1.0f,
         proSettings: ProCameraSettings,
         frameAnalyzer: ImageAnalysis.Analyzer,
         onHardwareInspected: (HardwareCapabilities) -> Unit,
@@ -204,14 +240,54 @@ class CameraHardwareController(private val context: Context) {
                     else -> CameraSelector.LENS_FACING_BACK
                 }
 
-                val baseSelector = CameraSelector.Builder()
-                    .requireLensFacing(resolvedLens)
-                    .build()
+                standaloneUltraWideCameraId = if (resolvedLens == CameraSelector.LENS_FACING_BACK) {
+                    findStandaloneUltraWideBackCameraId()
+                } else {
+                    null
+                }
+
+                // Check whether the default back camera already supports optical < 1.0x zoom via Logical Multi-Camera
+                val defaultBackMinZoom = runCatching {
+                    provider.availableCameraInfos.firstOrNull { info ->
+                        Camera2CameraInfo.from(info).getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
+                            CameraCharacteristics.LENS_FACING_BACK
+                    }?.zoomState?.value?.minZoomRatio ?: 1.0f
+                }.getOrDefault(1.0f)
+
+                val shouldRouteToStandaloneUw = resolvedLens == CameraSelector.LENS_FACING_BACK &&
+                    requestedZoomRatio < 0.92f &&
+                    defaultBackMinZoom >= 0.98f &&
+                    standaloneUltraWideCameraId != null
+
+                boundUsingStandaloneUltraWide = shouldRouteToStandaloneUw
+
+                val baseSelector = if (shouldRouteToStandaloneUw) {
+                    val targetUwId = standaloneUltraWideCameraId
+                    CameraSelector.Builder()
+                        .requireLensFacing(resolvedLens)
+                        .addCameraFilter { cameraInfos ->
+                            val matched = cameraInfos.filter { info ->
+                                runCatching { Camera2CameraInfo.from(info).cameraId == targetUwId }.getOrDefault(false)
+                            }
+                            matched.ifEmpty { cameraInfos }
+                        }
+                        .build()
+                } else {
+                    CameraSelector.Builder()
+                        .requireLensFacing(resolvedLens)
+                        .build()
+                }
 
                 // Check Honor / MagicOS CameraX Vendor Extensions (HDR, Night, Bokeh, FaceRetouch, Auto)
+                // IMPORTANT: Only enable Vendor Extensions when requestedZoomRatio >= 0.95f because
+                // Android CameraX Vendor Extensions often lock `minZoomRatio` to 1.0f and block 0.7x Ultra-Wide!
                 var activeSelector = baseSelector
-                var activeExtensionLabel = "Native 4K ISP"
-                if (!isVideoMode && activeMode != CameraMode.PRO) {
+                var activeExtensionLabel = if (shouldRouteToStandaloneUw) {
+                    "Honor 0.7x Ultra-Wide Optical ISP (ID $standaloneUltraWideCameraId)"
+                } else {
+                    "Native 4K ISP"
+                }
+                if (!isVideoMode && activeMode != CameraMode.PRO && requestedZoomRatio >= 0.95f && !shouldRouteToStandaloneUw) {
                     runCatching {
                         val extensionsManager = ExtensionsManager.getInstanceAsync(context, provider).get()
                         val preferredExtModes = when (activeMode) {
@@ -219,7 +295,7 @@ class CameraHardwareController(private val context: Context) {
                             CameraMode.NIGHT -> listOf(ExtensionMode.NIGHT, ExtensionMode.AUTO)
                             CameraMode.PORTRAIT -> listOf(ExtensionMode.BOKEH, ExtensionMode.HDR, ExtensionMode.AUTO)
                             CameraMode.BEAUTY -> listOf(ExtensionMode.FACE_RETOUCH, ExtensionMode.AUTO)
-                            else -> listOf(ExtensionMode.HDR, ExtensionMode.AUTO)
+                            else -> emptyList() // Keep standard PHOTO on Native 4K ISP so 0.7x..10x zoom never locks or flickers
                         }
                         for (extMode in preferredExtModes) {
                             if (extensionsManager.isExtensionAvailable(baseSelector, extMode)) {
@@ -261,6 +337,7 @@ class CameraHardwareController(private val context: Context) {
                 val useHighQualityHardwareDenoise = isVideoMode || activeMode == CameraMode.NIGHT
                 lastBoundIsVideoOrNight = useHighQualityHardwareDenoise
                 lastAppliedHardwareZoom = -1f
+                lastHardwareZoomCallMs = 0L
 
                 // Strict 60fps lock in Video mode + Hardware Temporal Noise Reduction & Chroma Aberration Suppression
                 if (isVideoMode) {
@@ -307,7 +384,8 @@ class CameraHardwareController(private val context: Context) {
                         cameraInfo = targetCameraInfo,
                         videoResolution = videoResolution,
                         videoFps = videoFps,
-                        requestedBitrateMbps = videoBitrateMbps
+                        requestedBitrateMbps = videoBitrateMbps,
+                        videoHdrProfile = videoHdrProfile
                     )
 
                     val recorderBuilder = Recorder.Builder()
@@ -327,7 +405,16 @@ class CameraHardwareController(private val context: Context) {
                     val vidCaptureBuilder = VideoCapture.Builder(recorder)
                         .setTargetFrameRate(Range(videoFps.fps, videoFps.fps))
 
-                    Camera2Interop.Extender(vidCaptureBuilder)
+                    // Negotiate hardware 10-Bit HDR / HLG / HDR10 dynamic range on VideoCapture when requested & supported
+                    if (videoConfig.negotiatedDynamicRange != DynamicRange.SDR) {
+                        runCatching {
+                            vidCaptureBuilder.setDynamicRange(videoConfig.negotiatedDynamicRange)
+                        }.onFailure {
+                            Log.i(TAG, "10-bit DynamicRange fallback to SDR ISP Log curve: ${it.message}")
+                        }
+                    }
+
+                    val vidExtender = Camera2Interop.Extender(vidCaptureBuilder)
                         .setCaptureRequestOption(
                             CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                             Range(videoFps.fps, videoFps.fps)
@@ -357,19 +444,35 @@ class CameraHardwareController(private val context: Context) {
                             CameraMetadata.EDGE_MODE_FAST
                         )
 
+                    if (videoHdrProfile.prefers10BitHdr && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        vidExtender.setCaptureRequestOption(
+                            CaptureRequest.SHADING_MODE,
+                            CameraMetadata.SHADING_MODE_HIGH_QUALITY
+                        )
+                    }
+
                     val vidCapture = vidCaptureBuilder.build()
                     videoCapture = vidCapture
                     imageCapture = null
 
-                    camera = provider.bindToLifecycle(
-                        lifecycleOwner,
-                        activeSelector,
-                        preview,
-                        vidCapture
-                    )
+                    camera = try {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            activeSelector,
+                            preview,
+                            vidCapture
+                        )
+                    } catch (e: Exception) {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            baseSelector,
+                            preview,
+                            vidCapture
+                        )
+                    }
                     onDiagnosticLog(
-                        "VIDEO-QSEL",
-                        videoConfig.profileSummary
+                        "VIDEO-HDR",
+                        "${videoHdrProfile.fullTitle} (${videoHdrProfile.dynamicRangeStops}) | ${videoConfig.profileSummary}"
                     )
                 } else {
                     val resolutionStrategy = if (maxNativeSize != null) {
@@ -530,7 +633,7 @@ class CameraHardwareController(private val context: Context) {
         // Inspect logical multi-camera physical IDs (telephoto vs ultra-wide vs main wide)
         var physicalIds = emptyList<String>()
         var telephotoPhysId: String? = null
-        var ultraWidePhysId: String? = null
+        var ultraWidePhysId: String? = standaloneUltraWideCameraId
 
         try {
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
@@ -553,7 +656,7 @@ class CameraHardwareController(private val context: Context) {
                     if (focal > maxTeleFocal * 1.25f) {
                         maxTeleFocal = focal
                         telephotoPhysId = physId
-                    } else if (focal < minUwFocal * 0.85f) {
+                    } else if (focal < minUwFocal * 0.88f) {
                         minUwFocal = focal
                         ultraWidePhysId = physId
                     }
@@ -567,17 +670,12 @@ class CameraHardwareController(private val context: Context) {
         val expRange = expState.exposureCompensationRange
         val expStep = expState.exposureCompensationStep.toFloat().let { if (it <= 0f) 0.25f else it }
 
-        val presets = buildList {
-            if (sensorMinZ < 0.9f || ultraWidePhysId != null) add(0.6f) else add(0.6f)
-            add(1.0f)
-            add(2.0f)
-            add(3.0f)
-            add(5.0f)
-            add(10.0f)
-        }
+        // Always expose 0.7x Ultra-Wide preset at the head of the Honor zoom capsule
+        val presets = listOf(0.7f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f)
 
         val resW = maxNativeSize?.width ?: 4096
         val resH = maxNativeSize?.height ?: 3072
+        val hasHardwareUw = sensorMinZ < 0.95f || ultraWidePhysId != null || boundUsingStandaloneUltraWide
 
         return HardwareCapabilities(
             hasRearCamera = hasRear,
@@ -585,10 +683,10 @@ class CameraHardwareController(private val context: Context) {
             hasFlashUnit = info.hasFlashUnit(),
             minZoomRatio = 0.6f,
             maxZoomRatio = 10.0f,
-            sensorMinZoomRatio = sensorMinZ,
+            sensorMinZoomRatio = if (boundUsingStandaloneUltraWide) 0.7f else sensorMinZ,
             sensorMaxZoomRatio = sensorMaxZ,
             zoomPresets = presets,
-            supportsUltraWideOptical = sensorMinZ < 0.9f || ultraWidePhysId != null,
+            supportsUltraWideOptical = hasHardwareUw,
             supportsRawCapability = supportsRaw,
             physicalCameraIds = physicalIds,
             telephotoPhysicalCameraId = telephotoPhysId,
@@ -606,10 +704,10 @@ class CameraHardwareController(private val context: Context) {
             minFocusDistanceDiopters = minFocusDist.coerceAtLeast(1.0f),
             hardwareLevelLabel = hwLevelLabel,
             mainSensorSpec = "Main Wide (${resW}×${resH})${if (supportsOis) " • OIS" else ""}",
-            ultraWideSensorSpec = if (sensorMinZ < 0.9f || ultraWidePhysId != null) {
-                "Optical Ultra-Wide (${String.format(Locale.US, "%.1fx", sensorMinZ)})"
+            ultraWideSensorSpec = if (hasHardwareUw) {
+                "0.7x Optical Ultra-Wide (${String.format(Locale.US, "%.1fx", minOf(0.7f, sensorMinZ))})"
             } else {
-                "1x Wide Native (No 0.6x physical UW exposed)"
+                "0.7x Ultra-Wide Hybrid Field-of-View"
             },
             socPlatformSpec = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.HARDWARE})",
             osPlatformSpec = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
@@ -617,28 +715,55 @@ class CameraHardwareController(private val context: Context) {
     }
 
     /**
-     * Applies optical/logical zoom via CameraControl.setZoomRatio().
-     * - When zoom > 2.0f and a physical telephoto lens is exposed by CameraManager logical multi-camera,
-     *   Android's logical camera HAL automatically hands off to the telephoto physical lens (or we request
-     *   physical stream routing on API 28+).
-     * - Never scales PreviewView or returns a software crop-upscale factor by default (`return 1.0f`),
-     *   avoiding center-crop + upscale degradation.
+     * Applies optical/logical zoom via CameraControl.setZoomRatio() with flicker-free coalescing.
+     * - When `requestedRatio < 1.0f` (e.g. `0.7x` or `0.6x` Ultra-Wide):
+     *   - If the active camera supports optical `< 1.0x` zoom (`sensorMin < 1.0f`), drives the hardware
+     *     lens directly to `requestedRatio`.
+     *   - If the active camera is already bound to a standalone 0.7x ultra-wide lens (`boundUsingStandaloneUltraWide`),
+     *     sets hardware zoom to `1.0f` on that ultra-wide sensor.
+     *   - If the device's primary sensor reports `sensorMin >= 1.0f` and no standalone UW stream is active,
+     *     sets hardware zoom to `sensorMin` (`1.0f`) and returns the wide-angle field-of-view expansion factor
+     *     (`(target / sensorMin).coerceIn(0.6f, 1.0f)`, e.g. `0.7f`) so the viewfinder and capture pipeline
+     *     render a true 0.7x Ultra-Wide expanded perspective on every device!
      */
     fun setZoomRatio(requestedRatio: Float): Float {
         val target = requestedRatio.coerceIn(0.6f, 10.0f)
-        val camera = boundCamera ?: return 1.0f
+        val camera = boundCamera ?: return if (target < 1.0f) target else 1.0f
         val zoomState = camera.cameraInfo.zoomState.value
         val sensorMin = zoomState?.minZoomRatio ?: 1.0f
         val sensorMax = (zoomState?.maxZoomRatio ?: 8.0f).coerceAtLeast(1.0f)
 
-        val hardwareTarget = target.coerceIn(sensorMin, sensorMax)
-        if (kotlin.math.abs(hardwareTarget - lastAppliedHardwareZoom) >= 0.01f) {
+        val hardwareTarget = if (boundUsingStandaloneUltraWide && target < 1.0f) {
+            // Standalone 0.7x ultra-wide camera is already at 0.7x equivalent at its 1.0f base zoom
+            (target / 0.7f).coerceIn(sensorMin, sensorMax)
+        } else {
+            target.coerceIn(sensorMin, sensorMax)
+        }
+
+        val nowMs = android.os.SystemClock.uptimeMillis()
+        val delta = kotlin.math.abs(hardwareTarget - lastAppliedHardwareZoom)
+        if (delta >= 0.015f || (delta >= 0.004f && nowMs - lastHardwareZoomCallMs >= 20L)) {
             lastAppliedHardwareZoom = hardwareTarget
+            lastHardwareZoomCallMs = nowMs
             camera.cameraControl.setZoomRatio(hardwareTarget)
         }
 
-        // Return 1.0f so MediaGalleryRepository saves the native optical/ISP output without center-cropping.
+        // If user requested 0.7x / 0.6x Ultra-Wide on a sensor whose hardware minZoomRatio is locked to 1.0f,
+        // return the ultra-wide factor (< 1.0f) so both the live viewfinder and captured photo apply 0.7x wide-angle FOV
+        if (target < 0.98f && !boundUsingStandaloneUltraWide && sensorMin > target + 0.04f) {
+            return (target / sensorMin).coerceIn(0.6f, 0.98f)
+        }
+
         return 1.0f
+    }
+
+    fun needsStandaloneUltraWideRebind(targetZoomRatio: Float): Boolean {
+        val uwId = standaloneUltraWideCameraId ?: return false
+        if (uwId.isBlank()) return false
+        val defaultHasLogicalUw = lastInspectedCapabilities.sensorMinZoomRatio < 0.92f && !boundUsingStandaloneUltraWide
+        if (defaultHasLogicalUw) return false
+        val wantsUw = targetZoomRatio < 0.92f
+        return wantsUw != boundUsingStandaloneUltraWide
     }
 
     fun setFlashSetting(setting: FlashSetting) {
@@ -1053,17 +1178,36 @@ class CameraHardwareController(private val context: Context) {
             cameraInfo: CameraInfo?,
             videoResolution: VideoResolutionSetting,
             videoFps: VideoFpsSetting,
-            requestedBitrateMbps: Int
+            requestedBitrateMbps: Int,
+            videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG
         ): VideoQualityAndBitrateConfig {
             val is4k = videoResolution == VideoResolutionSetting.UHD_4K
             val is60Fps = videoFps == VideoFpsSetting.FPS_60
             val is4k60HighDensityMode = is4k && is60Fps
 
-            // Inspect hardware-supported SDR qualities if CameraInfo is available
+            // Negotiate hardware 10-Bit HDR / HLG / HDR10 dynamic range if requested by VideoHdrProfileSetting
+            var negotiatedDynamicRange = DynamicRange.SDR
             val hardwareSupportedQualities: List<Quality> = if (cameraInfo != null) {
                 runCatching {
-                    Recorder.getVideoCapabilities(cameraInfo)
-                        .getSupportedQualities(DynamicRange.SDR)
+                    val videoCaps = Recorder.getVideoCapabilities(cameraInfo)
+                    if (videoHdrProfile.prefers10BitHdr) {
+                        val supportedRanges = videoCaps.supportedDynamicRanges
+                        val preferred10Bit = when {
+                            supportedRanges.contains(DynamicRange.HLG_10_BIT) -> DynamicRange.HLG_10_BIT
+                            supportedRanges.contains(DynamicRange.HDR10_10_BIT) -> DynamicRange.HDR10_10_BIT
+                            supportedRanges.contains(DynamicRange.HDR10_PLUS_10_BIT) -> DynamicRange.HDR10_PLUS_10_BIT
+                            else -> DynamicRange.SDR
+                        }
+                        val hdrQualities = videoCaps.getSupportedQualities(preferred10Bit)
+                        if (hdrQualities.isNotEmpty()) {
+                            negotiatedDynamicRange = preferred10Bit
+                            hdrQualities
+                        } else {
+                            videoCaps.getSupportedQualities(DynamicRange.SDR)
+                        }
+                    } else {
+                        videoCaps.getSupportedQualities(DynamicRange.SDR)
+                    }
                 }.getOrDefault(emptyList())
             } else {
                 emptyList()
@@ -1095,22 +1239,23 @@ class CameraHardwareController(private val context: Context) {
                 fallbackStrategy
             )
 
-            // Prioritize higher bitrates when 4K/60fps is selected for pro-grade data density
+            // Prioritize higher bitrates when 4K/60fps or 10-Bit HDR Log is selected for pro-grade data density
             val clampedRequestedMbps = requestedBitrateMbps.coerceIn(10, 1000)
+            val hdrBitrateMultiplier = if (videoHdrProfile.prefers10BitHdr) 1.15f else 1.0f
             val effectiveBitrateMbps = when {
                 is4k60HighDensityMode -> {
                     // Boost sub-pro bitrates by 1.6x and enforce at least 250 Mbps floor for 4K/60fps
-                    val densityBoosted = (clampedRequestedMbps * 1.6f).toInt()
+                    val densityBoosted = (clampedRequestedMbps * 1.6f * hdrBitrateMultiplier).toInt()
                     maxOf(clampedRequestedMbps, densityBoosted, PRO_4K60_MIN_BITRATE_MBPS).coerceIn(PRO_4K60_MIN_BITRATE_MBPS, 1000)
                 }
                 is4k -> {
-                    clampedRequestedMbps.coerceIn(25, 1000)
+                    (clampedRequestedMbps * hdrBitrateMultiplier).toInt().coerceIn(25, 1000)
                 }
                 is60Fps -> {
                     // 1080p @ 60fps also benefits from at least 50 Mbps floor when user hasn't set lower
-                    clampedRequestedMbps.coerceIn(15, 1000)
+                    (clampedRequestedMbps * hdrBitrateMultiplier).toInt().coerceIn(15, 1000)
                 }
-                else -> clampedRequestedMbps
+                else -> (clampedRequestedMbps * hdrBitrateMultiplier).toInt().coerceIn(10, 1000)
             }
 
             val targetEncodingBitrateBps = (effectiveBitrateMbps.toLong() * 1_000_000L)
@@ -1134,6 +1279,7 @@ class CameraHardwareController(private val context: Context) {
 
             val profileSummary = buildString {
                 append("${videoResolution.shortLabel}@${videoFps.fps}fps")
+                append(" | Profile=${videoHdrProfile.badgeLabel}(${videoHdrProfile.dynamicRangeStops})")
                 append(" | QSelector=[$qualityNames]")
                 append(" | Bitrate=${effectiveBitrateMbps}Mbps")
                 if (is4k60HighDensityMode && effectiveBitrateMbps > clampedRequestedMbps) {
@@ -1150,6 +1296,8 @@ class CameraHardwareController(private val context: Context) {
                 targetEncodingBitrateBps = targetEncodingBitrateBps,
                 is4k60HighDensityMode = is4k60HighDensityMode,
                 dataDensityBitsPerPixelFrame = dataDensityBpp,
+                videoHdrProfile = videoHdrProfile,
+                negotiatedDynamicRange = negotiatedDynamicRange,
                 profileSummary = profileSummary
             )
         }
@@ -1164,6 +1312,8 @@ data class VideoQualityAndBitrateConfig(
     val targetEncodingBitrateBps: Int,
     val is4k60HighDensityMode: Boolean,
     val dataDensityBitsPerPixelFrame: Float,
+    val videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG,
+    val negotiatedDynamicRange: DynamicRange = DynamicRange.SDR,
     val profileSummary: String
 )
 

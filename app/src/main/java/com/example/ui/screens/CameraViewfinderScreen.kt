@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.HdrOn
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -81,9 +82,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,6 +96,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -118,6 +122,7 @@ import com.example.model.LogProfile
 import com.example.model.PhotoFilterPreset
 import com.example.model.ProCameraSettings
 import com.example.model.TimerSetting
+import com.example.model.VideoHdrProfileSetting
 import com.example.ui.components.AiSceneCoachBottomSheet
 import com.example.ui.components.BitrateSelectorBottomSheet
 import com.example.ui.components.CameraSettingsDialog
@@ -205,18 +210,22 @@ fun CameraViewfinderScreen(
         }
     }
 
-    // Live Android ColorMatrix combining Creative LUT/Log (when enabled) AND Pro Mode Manual Overrides
+    // Live Android ColorMatrix combining Creative LUT/Log, Video HDR / HDR Log Profile, AND Pro Mode Manual Overrides
     val liveAndroidColorMatrix = remember(
         state.creativeFiltersEnabled,
         state.activeLut,
         state.lutIntensity,
         state.activeLogProfile,
         state.activeMode,
+        state.isVideoStreamMode,
+        state.videoHdrProfile,
         state.proSettings,
         state.hardwareCapabilities.exposureStepEv
     ) {
         val hasCreative = state.creativeFiltersEnabled &&
             (state.activeLut != PhotoFilterPreset.ORIGINAL || state.activeLogProfile != LogProfile.STANDARD_REC709)
+        val hasVideoHdrGrade = state.isVideoStreamMode &&
+            state.videoHdrProfile != VideoHdrProfileSetting.SDR_REC709
         val proMatrix = if (state.activeMode == CameraMode.PRO && state.proSettings.hasAnyManualOverride) {
             MediaGalleryRepository.buildProManualColorMatrix(
                 proSettings = state.proSettings,
@@ -226,25 +235,70 @@ fun CameraViewfinderScreen(
             null
         }
 
+        val effectiveLog = when {
+            hasVideoHdrGrade && state.videoHdrProfile.isLogCurve -> state.videoHdrProfile.associatedLogProfile
+            hasCreative -> state.activeLogProfile
+            else -> LogProfile.STANDARD_REC709
+        }
+        val extraHdrContrast = if (hasVideoHdrGrade) state.videoHdrProfile.extraContrast else 1.0f
+        val extraHdrSaturation = if (hasVideoHdrGrade) state.videoHdrProfile.extraSaturation else 1.0f
+        val extraHdrLift = if (hasVideoHdrGrade && !state.videoHdrProfile.isLogCurve) state.videoHdrProfile.shadowLift else 0f
+
         when {
-            hasCreative && proMatrix != null -> {
+            (hasCreative || hasVideoHdrGrade) && proMatrix != null -> {
                 MediaGalleryRepository.buildCombinedColorMatrix(
-                    lut = state.activeLut,
-                    lutIntensity = state.lutIntensity,
-                    logProfile = state.activeLogProfile
+                    lut = if (hasCreative) state.activeLut else PhotoFilterPreset.ORIGINAL,
+                    lutIntensity = if (hasCreative) state.lutIntensity else 0f,
+                    logProfile = effectiveLog,
+                    extraContrast = extraHdrContrast,
+                    extraSaturation = extraHdrSaturation,
+                    extraBrightness = extraHdrLift
                 ).apply { postConcat(proMatrix) }
             }
-            hasCreative -> {
+            hasCreative || hasVideoHdrGrade -> {
                 MediaGalleryRepository.buildCombinedColorMatrix(
-                    lut = state.activeLut,
-                    lutIntensity = state.lutIntensity,
-                    logProfile = state.activeLogProfile
+                    lut = if (hasCreative) state.activeLut else PhotoFilterPreset.ORIGINAL,
+                    lutIntensity = if (hasCreative) state.lutIntensity else 0f,
+                    logProfile = effectiveLog,
+                    extraContrast = extraHdrContrast,
+                    extraSaturation = extraHdrSaturation,
+                    extraBrightness = extraHdrLift
                 )
             }
             proMatrix != null -> proMatrix
             else -> null
         }
     }
+
+    // Apply RenderEffect ONLY when liveAndroidColorMatrix actually changes — never inside AndroidView(update = ...)
+    // so pinch-to-zoom and preset zoom transitions never invalidate the hardware SurfaceView layer (zero zoom flicker!)
+    LaunchedEffect(liveAndroidColorMatrix) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            if (liveAndroidColorMatrix != null) {
+                previewView.setRenderEffect(
+                    android.graphics.RenderEffect.createColorFilterEffect(
+                        android.graphics.ColorMatrixColorFilter(liveAndroidColorMatrix)
+                    )
+                )
+            } else {
+                previewView.setRenderEffect(null)
+            }
+        }
+    }
+
+    // Always read the latest currentZoomRatio inside pointerInput(Unit) so pinch-to-zoom never snaps back to stale 1.0x!
+    val latestZoomRatio by rememberUpdatedState(state.currentZoomRatio)
+
+    // Smooth animated wide-angle viewport factor when 0.7x / 0.6x Ultra-Wide is active on a 1.0x-locked primary sensor
+    val animatedUltraWideViewportScale by animateFloatAsState(
+        targetValue = if (state.extraHybridZoomFactor < 0.98f) {
+            state.extraHybridZoomFactor.coerceIn(0.68f, 1.0f)
+        } else {
+            1.0f
+        },
+        animationSpec = spring(dampingRatio = 0.88f, stiffness = 420f),
+        label = "ultraWideViewportScale"
+    )
 
     // Draggable Floating Shutter Button state
     var floatingShutterOffsetX by remember { mutableFloatStateOf(240f) }
@@ -267,9 +321,11 @@ fun CameraViewfinderScreen(
                     var lastPinchUpdateMs = 0L
                     detectTransformGestures { _, _, zoomChange, _ ->
                         val now = android.os.SystemClock.uptimeMillis()
-                        if (abs(zoomChange - 1f) > 0.012f && (now - lastPinchUpdateMs >= 16L)) {
+                        if (abs(zoomChange - 1f) > 0.008f && (now - lastPinchUpdateMs >= 16L)) {
                             lastPinchUpdateMs = now
-                            val nextZoom = state.currentZoomRatio * zoomChange
+                            // Multiply against latestZoomRatio (via rememberUpdatedState) so zoom glides without flickering!
+                            val dampedChange = 1f + (zoomChange - 1f) * 0.85f
+                            val nextZoom = (latestZoomRatio * dampedChange).coerceIn(0.6f, 10.0f)
                             viewModel.setZoomRatio(nextZoom, isContinuousGesture = true)
                         }
                     }
@@ -283,20 +339,13 @@ fun CameraViewfinderScreen(
         ) {
             AndroidView(
                 factory = { previewView },
-                update = { view ->
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                        if (liveAndroidColorMatrix != null) {
-                            view.setRenderEffect(
-                                android.graphics.RenderEffect.createColorFilterEffect(
-                                    android.graphics.ColorMatrixColorFilter(liveAndroidColorMatrix)
-                                )
-                            )
-                        } else {
-                            view.setRenderEffect(null)
-                        }
+                update = { /* Intentionally empty to prevent hardware surface flicker during zoom recompositions */ },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = animatedUltraWideViewportScale
+                        scaleY = animatedUltraWideViewportScale
                     }
-                },
-                modifier = Modifier.fillMaxSize()
             )
 
             // 2. Composition Grid, Horizon Level Indicator, Pro Focus Peaking & Mode Guides
@@ -640,8 +689,48 @@ fun CameraViewfinderScreen(
                     )
                 }
 
-                // Video Bitrate Quick Pill (10 - 1000 Mbps)
+                // Video HDR / HDR Log Quick Pill (SDR / HDR10 / HDR LOG / HDR VIVID) + Video Bitrate Quick Pill
                 if (state.isVideoStreamMode) {
+                    val isHdrActive = state.videoHdrProfile != VideoHdrProfileSetting.SDR_REC709
+                    val hdrBadgeColor = when {
+                        state.videoHdrProfile.isLogCurve -> AiCyan
+                        isHdrActive -> GalaxyAmber
+                        else -> TextSecondaryZinc
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(
+                                if (isHdrActive) hdrBadgeColor.copy(alpha = 0.22f) else ObsidianGlass
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isHdrActive) hdrBadgeColor else DividerSubtle,
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                            .clickable {
+                                viewModel.cycleVideoHdrProfile(lifecycleOwner, previewView)
+                            }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("cycle_video_hdr_profile_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.HdrOn,
+                            contentDescription = "Video HDR & HDR Log Profile",
+                            tint = hdrBadgeColor,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${state.videoHdrProfile.badgeLabel} • ${state.videoHdrProfile.dynamicRangeStops}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isHdrActive) hdrBadgeColor else TextPrimaryWhite,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -1033,7 +1122,13 @@ fun CameraViewfinderScreen(
                 },
                 onToggleGridlines = viewModel::toggleGridLines,
                 onToggleLevel = viewModel::toggleLevel,
-                onCycleAiUpscale = viewModel::cycleAiUpscaleMode,
+                onCycleAiUpscale = {
+                    if (state.isVideoStreamMode) {
+                        viewModel.cycleVideoHdrProfile(lifecycleOwner, previewView)
+                    } else {
+                        viewModel.cycleAiUpscaleMode()
+                    }
+                },
                 onOpenFullSettings = { viewModel.setShowSettingsDialog(true) },
                 onDismiss = { viewModel.setShowQuickMenuPopup(false) }
             )
@@ -1047,6 +1142,9 @@ fun CameraViewfinderScreen(
                 onSelectLut = viewModel::selectActiveLut,
                 onUpdateIntensity = viewModel::updateLutIntensity,
                 onSelectLogProfile = viewModel::selectLogProfile,
+                onSelectVideoHdrProfile = { profile ->
+                    viewModel.selectVideoHdrProfile(profile, lifecycleOwner, previewView)
+                },
                 onDismiss = { viewModel.setShowLutLogSheet(false) }
             )
         }
@@ -1098,6 +1196,9 @@ fun CameraViewfinderScreen(
                     viewModel.toggleVideoResolution(lifecycleOwner, previewView)
                 },
                 onCycleVideoFormat = viewModel::cycleVideoFormat,
+                onCycleVideoHdrProfile = {
+                    viewModel.cycleVideoHdrProfile(lifecycleOwner, previewView)
+                },
                 onToggleVideoFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },

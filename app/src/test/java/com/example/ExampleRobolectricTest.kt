@@ -144,12 +144,14 @@ class ExampleRobolectricTest {
 
         val caps = viewModel.uiState.value.hardwareCapabilities
         assertEquals(
-            listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f),
+            listOf(0.7f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f),
             caps.zoomPresets
         )
 
-        viewModel.setZoomRatio(0.6f)
+        viewModel.setZoomRatio(0.7f)
         assertEquals(ZoomOptimizationProfile.ULTRAWIDE_12MP_0_6X, viewModel.uiState.value.activeZoomProfile)
+        assertEquals(0.7f, viewModel.uiState.value.currentZoomRatio, 0.001f)
+        assertTrue(viewModel.uiState.value.extraHybridZoomFactor <= 0.75f)
 
         viewModel.setZoomRatio(1.0f)
         assertEquals(ZoomOptimizationProfile.NATIVE_200MP_1X, viewModel.uiState.value.activeZoomProfile)
@@ -166,6 +168,16 @@ class ExampleRobolectricTest {
         viewModel.setZoomRatio(10.0f)
         assertEquals(ZoomOptimizationProfile.NATURAL_TELEPHOTO_10X, viewModel.uiState.value.activeZoomProfile)
         assertEquals(1.0f, viewModel.uiState.value.extraHybridZoomFactor, 0.001f)
+
+        // Cycle Video HDR & Magic-Log Profiles: HDR10 -> HDR LOG -> HDR VIVID -> SDR
+        assertEquals(com.example.model.VideoHdrProfileSetting.HDR10_HLG, viewModel.uiState.value.videoHdrProfile)
+        viewModel.cycleVideoHdrProfile()
+        assertEquals(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG, viewModel.uiState.value.videoHdrProfile)
+        assertTrue(viewModel.uiState.value.videoHdrProfile.isLogCurve)
+        viewModel.cycleVideoHdrProfile()
+        assertEquals(com.example.model.VideoHdrProfileSetting.HDR_VIVID, viewModel.uiState.value.videoHdrProfile)
+        viewModel.cycleVideoHdrProfile()
+        assertEquals(com.example.model.VideoHdrProfileSetting.SDR_REC709, viewModel.uiState.value.videoHdrProfile)
 
         // Cycle Photo Formats: JPEG -> RAW_DNG -> PNG_LOSSLESS -> WEBP_LOSSLESS
         assertEquals(PhotoFormatSetting.JPEG, viewModel.uiState.value.photoFormat)
@@ -242,22 +254,34 @@ class ExampleRobolectricTest {
         assertEquals(250_000_000, config4k60.targetEncodingBitrateBps)
         assertTrue(config4k60.dataDensityBitsPerPixelFrame > 0.45f)
 
-        // 2. 4K / 60fps with 400 Mbps input boosts by 1.6x (640 Mbps) for pro-grade data density
+        // 2. 4K / 60fps with 400 Mbps input boosts by 1.6x (640 Mbps in SDR, 736 Mbps in 10-Bit HDR Log) for pro-grade data density
         val config4k60High = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
             cameraInfo = null,
             videoResolution = VideoResolutionSetting.UHD_4K,
             videoFps = com.example.model.VideoFpsSetting.FPS_60,
-            requestedBitrateMbps = 400
+            requestedBitrateMbps = 400,
+            videoHdrProfile = com.example.model.VideoHdrProfileSetting.SDR_REC709
         )
         assertEquals(640, config4k60High.effectiveBitrateMbps)
         assertEquals(640_000_000, config4k60High.targetEncodingBitrateBps)
 
-        // 3. 1080p / 30fps prioritizes Quality.FHD first and preserves standard bitrate without 4K60 boost
+        val config4k60HdrLog = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.UHD_4K,
+            videoFps = com.example.model.VideoFpsSetting.FPS_60,
+            requestedBitrateMbps = 400,
+            videoHdrProfile = com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG
+        )
+        assertTrue(config4k60HdrLog.effectiveBitrateMbps > config4k60High.effectiveBitrateMbps)
+        assertEquals(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG, config4k60HdrLog.videoHdrProfile)
+
+        // 3. 1080p / 30fps in SDR prioritizes Quality.FHD first and preserves standard bitrate without 4K60 boost
         val config1080p30 = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
             cameraInfo = null,
             videoResolution = VideoResolutionSetting.FHD_1080P,
             videoFps = com.example.model.VideoFpsSetting.FPS_30,
-            requestedBitrateMbps = 80
+            requestedBitrateMbps = 80,
+            videoHdrProfile = com.example.model.VideoHdrProfileSetting.SDR_REC709
         )
         assertFalse(config1080p30.is4k60HighDensityMode)
         assertEquals(androidx.camera.video.Quality.FHD, config1080p30.prioritizedQualityOrder.first())
@@ -276,6 +300,9 @@ class ExampleRobolectricTest {
             setPixel(8, 8, Color.rgb(30, 20, 34)) // subtle high-ISO chroma/luma grain within threshold
         }
         val srEngine = OnDeviceSuperResolutionEngine(context)
+        assertTrue(srEngine.hasBundledTfliteModel(2))
+        assertTrue(srEngine.hasBundledTfliteModel(4))
+
         val result = srEngine.upscaleBitmapTiled(
             source = noisyNight,
             mode = AiUpscaleMode.UPSCALE_2X,
@@ -283,6 +310,16 @@ class ExampleRobolectricTest {
         ) {}
         assertEquals(32, result.bitmap.width)
         assertEquals(32, result.bitmap.height)
+        assertTrue(result.neuralWeightsLoadedBytes > 1_000_000L)
+
+        // Verify RAW 16-Bit DNG Linear Master is visually distinct from Original and AI Master
+        val galleryRepo = com.example.data.MediaGalleryRepository(context)
+        val rawLinear = galleryRepo.renderLinearRawDngMaster(noisyNight)
+        val origPixel = noisyNight.getPixel(4, 4)
+        val rawPixel = rawLinear.getPixel(4, 4)
+        val aiPixel = result.bitmap.getPixel(8, 8)
+        assertTrue("RAW Linear DNG must lift shadow toe relative to Original", rawPixel != origPixel)
+        assertTrue("AI Master must be visually distinct from Original", aiPixel != origPixel)
 
         // Verify Honor Camera Settings toggles & Pro Mode color matrix
         val viewModel = CameraViewModel(context as Application)

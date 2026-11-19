@@ -159,9 +159,9 @@ enum class ZoomOptimizationProfile(
     val microDetailContrast: Float
 ) {
     ULTRAWIDE_12MP_0_6X(
-        badgeLabel = "0.6x Ultra-Wide",
+        badgeLabel = "0.7x Ultra-Wide",
         sensorLabel = "Ultra-Wide Physical Lens",
-        pipelineSummary = "Optical ultra-wide lens • Native StreamConfigurationMap output",
+        pipelineSummary = "Optical ultra-wide lens • Wide-Angle Field-of-View output",
         contrastMultiplier = 1.0f,
         saturationMultiplier = 1.0f,
         shadowLiftOffset = 0f,
@@ -222,7 +222,7 @@ enum class ZoomOptimizationProfile(
     companion object {
         fun fromZoomRatio(zoom: Float): ZoomOptimizationProfile {
             return when {
-                zoom < 0.85f -> ULTRAWIDE_12MP_0_6X
+                zoom < 0.88f -> ULTRAWIDE_12MP_0_6X
                 zoom < 1.55f -> NATIVE_200MP_1X
                 zoom < 2.55f -> SENSOR_CROP_2X
                 zoom < 3.65f -> DEDICATED_3X_SUPER_RES
@@ -292,6 +292,73 @@ enum class VideoResolutionSetting(
 enum class VideoFpsSetting(val fps: Int, val label: String) {
     FPS_30(30, "30fps"),
     FPS_60(60, "60fps")
+}
+
+/**
+ * Video HDR & Cinema HDR Log Profiles (`SDR Rec.709`, `HDR10 / HLG 10-Bit`, `Honor Magic-Log HDR 10-Bit`, `HDR Vivid`).
+ * Drives both hardware `VideoCapture` 10-bit dynamic range negotiation (`DynamicRange.HLG_10_BIT` / `HDR10_10_BIT`)
+ * and real-time viewfinder & ISP logarithmic tone curve rendering.
+ */
+enum class VideoHdrProfileSetting(
+    val badgeLabel: String,
+    val fullTitle: String,
+    val subtitle: String,
+    val dynamicRangeStops: String,
+    val prefers10BitHdr: Boolean,
+    val isLogCurve: Boolean,
+    val associatedLogProfile: LogProfile,
+    val extraContrast: Float,
+    val extraSaturation: Float,
+    val shadowLift: Float
+) {
+    SDR_REC709(
+        badgeLabel = "SDR",
+        fullTitle = "Standard SDR (Rec.709 8-Bit)",
+        subtitle = "Standard dynamic range ready for universal playback",
+        dynamicRangeStops = "11 Stops",
+        prefers10BitHdr = false,
+        isLogCurve = false,
+        associatedLogProfile = LogProfile.STANDARD_REC709,
+        extraContrast = 1.0f,
+        extraSaturation = 1.0f,
+        shadowLift = 0f
+    ),
+    HDR10_HLG(
+        badgeLabel = "HDR10",
+        fullTitle = "HDR10 / HLG 10-Bit Wide Gamut",
+        subtitle = "BT.2020 10-bit HLG/HDR10 highlight retention & deep shadow clarity",
+        dynamicRangeStops = "13.5 Stops",
+        prefers10BitHdr = true,
+        isLogCurve = false,
+        associatedLogProfile = LogProfile.STANDARD_REC709,
+        extraContrast = 1.08f,
+        extraSaturation = 1.12f,
+        shadowLift = 8f
+    ),
+    HONOR_MAGIC_HDR_LOG(
+        badgeLabel = "HDR LOG",
+        fullTitle = "Honor Magic-Log 10-Bit Cinema HDR Log",
+        subtitle = "Flat 10-bit logarithmic curve preserving 15+ stops for pro LUT color grading",
+        dynamicRangeStops = "15+ Stops",
+        prefers10BitHdr = true,
+        isLogCurve = true,
+        associatedLogProfile = LogProfile.GALAXY_LOG,
+        extraContrast = 0.80f,
+        extraSaturation = 0.75f,
+        shadowLift = 26f
+    ),
+    HDR_VIVID(
+        badgeLabel = "HDR VIVID",
+        fullTitle = "Honor HDR Vivid 10-Bit Dynamic Tone",
+        subtitle = "Dynamic metadata tone-mapping with punchy specular highlights & rich color",
+        dynamicRangeStops = "14 Stops",
+        prefers10BitHdr = true,
+        isLogCurve = false,
+        associatedLogProfile = LogProfile.STANDARD_REC709,
+        extraContrast = 1.14f,
+        extraSaturation = 1.18f,
+        shadowLift = 6f
+    )
 }
 
 /**
@@ -546,7 +613,7 @@ data class HardwareCapabilities(
     val maxZoomRatio: Float = 10.0f,
     val sensorMaxZoomRatio: Float = 8.0f,
     val sensorMinZoomRatio: Float = 1.0f,
-    val zoomPresets: List<Float> = listOf(0.6f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f),
+    val zoomPresets: List<Float> = listOf(0.7f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f),
     val supportsUltraWideOptical: Boolean = true,
     val supports4K: Boolean = true,
     val supports60Fps: Boolean = true,
