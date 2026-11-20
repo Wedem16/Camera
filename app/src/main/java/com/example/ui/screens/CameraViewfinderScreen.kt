@@ -176,7 +176,7 @@ fun CameraViewfinderScreen(
         }
     }
 
-    DisposableEffect(lifecycleOwner, state.hasCameraPermission, state.activeMode) {
+    DisposableEffect(lifecycleOwner, state.hasCameraPermission, state.activeMode, state.isVideoStreamMode) {
         viewModel.bindCameraToLifecycle(lifecycleOwner, previewView)
         onDispose { }
     }
@@ -909,8 +909,10 @@ fun CameraViewfinderScreen(
             val contextualTip = when {
                 state.activeMode == CameraMode.SUPER_MACRO -> "Keep 4cm away from subject"
                 state.activeMode == CameraMode.PORTRAIT && state.currentZoomRatio >= 2.0f -> "Move further away"
+                state.activeMode == CameraMode.PRO && state.proVideoModeEnabled ->
+                    "PRO VIDEO ${if (state.videoResolution.widthPx >= 3840) "4K" else "1080p"} ${state.videoFps.label} • ${state.videoHdrProfile.badgeLabel} • ISO ${state.proSettings.formattedIso} • S ${state.proSettings.formattedShutter} • WB ${state.proSettings.formattedWb}"
                 state.activeMode == CameraMode.PRO && state.proSettings.hasAnyManualOverride ->
-                    "PRO MANUAL • ISO ${state.proSettings.formattedIso} • S ${state.proSettings.formattedShutter} • WB ${state.proSettings.formattedWb}"
+                    "PRO PHOTO • ISO ${state.proSettings.formattedIso} • S ${state.proSettings.formattedShutter} • WB ${state.proSettings.formattedWb}"
                 else -> null
             }
             if (contextualTip != null) {
@@ -1020,6 +1022,11 @@ fun CameraViewfinderScreen(
                         activeTab = state.activeProTab,
                         capabilities = state.hardwareCapabilities,
                         photoFormat = state.photoFormat,
+                        isProVideoMode = state.proVideoModeEnabled,
+                        videoResolution = state.videoResolution,
+                        videoFps = state.videoFps,
+                        videoFormat = state.videoFormat,
+                        videoHdrProfile = state.videoHdrProfile,
                         histogramBins = state.sceneMetrics.histogramBins,
                         averageLuminance = state.sceneMetrics.averageLuminance,
                         onSelectTab = viewModel::selectProTab,
@@ -1031,6 +1038,14 @@ fun CameraViewfinderScreen(
                         onToggleFocusPeaking = viewModel::toggleProFocusPeaking,
                         onUpdateExposureIndex = viewModel::updateProExposureIndex,
                         onCyclePhotoFormat = viewModel::cyclePhotoFormat,
+                        onSetProVideoMode = viewModel::setProVideoModeEnabled,
+                        onCycleVideoFormat = viewModel::cycleVideoFormat,
+                        onCycleVideoHdrProfile = {
+                            viewModel.cycleVideoHdrProfile(lifecycleOwner, previewView)
+                        },
+                        onToggleVideoFps = {
+                            viewModel.toggleVideoFps(lifecycleOwner, previewView)
+                        },
                         onResetPro = viewModel::resetProSettings
                     )
                     Spacer(modifier = Modifier.height(8.dp))

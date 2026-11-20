@@ -446,18 +446,34 @@ class ExampleRobolectricTest {
         assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm1.uiState.value.activeLut)
         assertEquals(LogProfile.SONY_SLOG3, vm1.uiState.value.activeLogProfile)
 
-        // Creating a brand-new CameraViewModel instance (simulating app restart) must restore all user settings
+        // Switch to PRO mode and enable Pro Video sub-mode
+        vm1.selectMode(CameraMode.PRO)
+        assertFalse(vm1.uiState.value.proVideoModeEnabled)
+        assertFalse(vm1.uiState.value.isVideoStreamMode)
+        vm1.setProVideoModeEnabled(true)
+        assertTrue(vm1.uiState.value.proVideoModeEnabled)
+        assertTrue(vm1.uiState.value.isVideoStreamMode)
+        assertEquals(CameraMode.PRO, vm1.uiState.value.activeMode)
+
+        // Creating a brand-new CameraViewModel instance (simulating app restart) must restore all user settings including Pro Video
         val vm2 = CameraViewModel(app)
         assertEquals(com.example.model.VideoFpsSetting.FPS_120, vm2.uiState.value.videoFps)
         assertEquals(500, vm2.uiState.value.videoBitrateMbps)
         assertEquals(VideoResolutionSetting.FHD_1080P, vm2.uiState.value.videoResolution)
-        assertEquals(CameraMode.VIDEO, vm2.uiState.value.activeMode)
+        assertEquals(CameraMode.PRO, vm2.uiState.value.activeMode)
+        assertTrue(vm2.uiState.value.proVideoModeEnabled)
+        assertTrue(vm2.uiState.value.isVideoStreamMode)
         assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm2.uiState.value.activeLut)
         assertEquals(LogProfile.SONY_SLOG3, vm2.uiState.value.activeLogProfile)
         assertEquals(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG, vm2.uiState.value.videoHdrProfile)
         assertEquals(400, vm2.uiState.value.proSettings.iso)
         assertEquals(8_000_000L, vm2.uiState.value.proSettings.shutterSpeedNs)
         assertTrue(vm2.uiState.value.watermarkEnabled)
+
+        // Toggle back to Pro Photo
+        vm2.toggleProVideoMode()
+        assertFalse(vm2.uiState.value.proVideoModeEnabled)
+        assertFalse(vm2.uiState.value.isVideoStreamMode)
 
         // Clean up prefs for any subsequent test runs
         vm2.restoreDefaultCameraSettings()

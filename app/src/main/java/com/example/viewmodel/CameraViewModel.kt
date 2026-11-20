@@ -142,6 +142,7 @@ data class CameraUiState(
     val portraitBlurStrength: Float = 0.65f,
     val beautySmoothness: Float = 0.55f,
     val proSettings: ProCameraSettings = ProCameraSettings(),
+    val proVideoModeEnabled: Boolean = false,
     val activeProTab: ProParameterTab = ProParameterTab.ISO,
     val hardwareCapabilities: HardwareCapabilities = HardwareCapabilities(),
     val focusPoint: Offset? = null,
@@ -170,7 +171,7 @@ data class CameraUiState(
             CameraMode.MULTI_VIDEO,
             CameraMode.SLOW_MO,
             CameraMode.TIME_LAPSE
-        )
+        ) || (activeMode == CameraMode.PRO && proVideoModeEnabled)
 }
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
@@ -340,7 +341,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             currentZoomRatio = prefs.getFloat("currentZoomRatio", base.currentZoomRatio),
             portraitBlurStrength = prefs.getFloat("portraitBlurStrength", base.portraitBlurStrength),
             beautySmoothness = prefs.getFloat("beautySmoothness", base.beautySmoothness),
-            proSettings = restoredPro
+            proSettings = restoredPro,
+            proVideoModeEnabled = prefs.getBoolean("proVideoModeEnabled", base.proVideoModeEnabled)
         )
     }
 
@@ -403,6 +405,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 putFloat("pro_manualFocus", state.proSettings.manualFocusDistance ?: -1f)
                 putBoolean("pro_peaking", state.proSettings.focusPeakingEnabled)
                 putInt("pro_evIndex", state.proSettings.exposureCompensationIndex)
+                putBoolean("proVideoModeEnabled", state.proVideoModeEnabled)
             }
             apply()
         }
@@ -1287,7 +1290,42 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(beautySmoothness = smoothness.coerceIn(0f, 1f)) }
     }
 
-    // Pro Mode Controls
+    // Pro Mode Controls (Photo & Video)
+    fun setProVideoModeEnabled(enabled: Boolean) {
+        if (_uiState.value.isRecordingVideo) {
+            showStatusBanner("Stop video recording before switching Pro Photo / Pro Video.")
+            return
+        }
+        _uiState.update {
+            it.copy(
+                activeMode = CameraMode.PRO,
+                proVideoModeEnabled = enabled
+            )
+        }
+        val state = _uiState.value
+        if (enabled) {
+            appendDiagnosticLog(
+                "PRO-VIDEO",
+                "Pro Cinema Video Active: ${state.videoResolution.shortLabel} @ ${state.videoFps.label} (${state.videoHdrProfile.badgeLabel} • ${state.videoBitrateMbps} Mbps)"
+            )
+            showStatusBanner(
+                "Pro Video: ${state.videoResolution.shortLabel} ${state.videoFps.label} • ${state.videoHdrProfile.badgeLabel} • Manual M/ISO/S/EV/AF/WB"
+            )
+        } else {
+            appendDiagnosticLog(
+                "PRO-PHOTO",
+                "Pro Manual Photo Active: ${state.photoResolution.shortLabel} (${state.photoFormat.badgeLabel})"
+            )
+            showStatusBanner(
+                "Pro Photo: ${state.photoResolution.shortLabel} (${state.photoFormat.badgeLabel}) • Manual M/ISO/S/EV/AF/WB"
+            )
+        }
+    }
+
+    fun toggleProVideoMode() {
+        setProVideoModeEnabled(!_uiState.value.proVideoModeEnabled)
+    }
+
     fun selectProTab(tab: ProParameterTab) {
         _uiState.update {
             it.copy(activeProTab = if (it.activeProTab == tab) ProParameterTab.NONE else tab)

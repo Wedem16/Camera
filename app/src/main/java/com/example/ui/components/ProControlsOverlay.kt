@@ -24,8 +24,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -51,13 +53,19 @@ import com.example.model.PhotoFormatSetting
 import com.example.model.ProCameraSettings
 import com.example.model.ProMeteringMode
 import com.example.model.ProParameterTab
+import com.example.model.VideoFormatSetting
+import com.example.model.VideoFpsSetting
+import com.example.model.VideoHdrProfileSetting
+import com.example.model.VideoResolutionSetting
 import com.example.model.WhiteBalancePreset
 import com.example.ui.theme.AiCyan
+import com.example.ui.theme.AmoledBlack
 import com.example.ui.theme.DividerSubtle
 import com.example.ui.theme.EmeraldOptimal
 import com.example.ui.theme.GalaxyAmber
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianGlass
+import com.example.ui.theme.RecordCrimson
 import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
 import java.util.Locale
@@ -90,6 +98,11 @@ fun ProControlsOverlay(
     activeTab: ProParameterTab,
     capabilities: HardwareCapabilities,
     photoFormat: PhotoFormatSetting = PhotoFormatSetting.JPEG,
+    isProVideoMode: Boolean = false,
+    videoResolution: VideoResolutionSetting = VideoResolutionSetting.UHD_4K,
+    videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
+    videoFormat: VideoFormatSetting = VideoFormatSetting.MP4_AVC,
+    videoHdrProfile: VideoHdrProfileSetting = VideoHdrProfileSetting.HDR10_HLG,
     histogramBins: List<Float>,
     averageLuminance: Float,
     onSelectTab: (ProParameterTab) -> Unit,
@@ -101,6 +114,10 @@ fun ProControlsOverlay(
     onToggleFocusPeaking: () -> Unit = {},
     onUpdateExposureIndex: (Int) -> Unit,
     onCyclePhotoFormat: () -> Unit = {},
+    onSetProVideoMode: (Boolean) -> Unit = {},
+    onCycleVideoFormat: () -> Unit = {},
+    onCycleVideoHdrProfile: () -> Unit = {},
+    onToggleVideoFps: () -> Unit = {},
     onResetPro: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -110,10 +127,11 @@ fun ProControlsOverlay(
             .padding(horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top row: Live Luminance Histogram + JPG/RAW Badge + Reset
+        // Top row: Live Luminance Histogram + Pro [PHOTO | VIDEO] Switcher + Format/HDR Badges + Reset
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(bottom = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -124,38 +142,185 @@ fun ProControlsOverlay(
                 hasManualOverride = proSettings.hasAnyManualOverride
             )
 
+            Spacer(modifier = Modifier.width(6.dp))
+
+            // Honor Pro [📷 PHOTO | 🎥 VIDEO] Segmented Switcher
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(ObsidianGlass)
+                    .border(
+                        width = 1.dp,
+                        color = if (isProVideoMode) RecordCrimson.copy(alpha = 0.8f) else GalaxyAmber.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(18.dp)
+                    )
+                    .padding(2.dp)
+                    .testTag("pro_photo_video_toggle")
             ) {
-                // Honor Pro Format Badge (JPG / RAW+JPG)
-                Box(
-                    contentAlignment = Alignment.Center,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            if (photoFormat == PhotoFormatSetting.RAW_DNG) {
-                                GalaxyAmber.copy(alpha = 0.22f)
-                            } else {
-                                ObsidianGlass
-                            }
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else DividerSubtle,
-                            shape = RoundedCornerShape(16.dp)
-                        )
-                        .clickable(onClick = onCyclePhotoFormat)
-                        .minimumInteractiveComponentSize()
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                        .testTag("pro_format_badge")
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(if (!isProVideoMode) GalaxyAmber else Color.Transparent)
+                        .clickable { onSetProVideoMode(false) }
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .testTag("pro_submode_photo")
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = "Pro Photo Mode",
+                        tint = if (!isProVideoMode) AmoledBlack else TextSecondaryZinc,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
-                        text = photoFormat.badgeLabel,
+                        text = "PHOTO",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
-                        color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else TextPrimaryWhite
+                        color = if (!isProVideoMode) AmoledBlack else TextSecondaryZinc
                     )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(if (isProVideoMode) RecordCrimson else Color.Transparent)
+                        .clickable { onSetProVideoMode(true) }
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .testTag("pro_submode_video")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = "Pro Video Mode",
+                        tint = if (isProVideoMode) TextPrimaryWhite else TextSecondaryZinc,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "VIDEO",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isProVideoMode) TextPrimaryWhite else TextSecondaryZinc
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (isProVideoMode) {
+                    // Pro Video 10-Bit HDR / Magic-Log Badge
+                    val isLogOrHdr = videoHdrProfile != VideoHdrProfileSetting.SDR_REC709
+                    val hdrAccent = if (videoHdrProfile.isLogCurve) AiCyan else GalaxyAmber
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isLogOrHdr) hdrAccent.copy(alpha = 0.22f) else ObsidianGlass
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isLogOrHdr) hdrAccent else DividerSubtle,
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clickable(onClick = onCycleVideoHdrProfile)
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .testTag("pro_video_hdr_badge")
+                    ) {
+                        Text(
+                            text = videoHdrProfile.badgeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isLogOrHdr) hdrAccent else TextPrimaryWhite
+                        )
+                    }
+
+                    // Pro Video FPS Badge (30fps / 60fps / 120fps)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (videoFps == VideoFpsSetting.FPS_120) AiCyan.copy(alpha = 0.22f) else ObsidianGlass
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (videoFps == VideoFpsSetting.FPS_120) AiCyan else GalaxyAmber.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clickable(onClick = onToggleVideoFps)
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .testTag("pro_video_fps_badge")
+                    ) {
+                        Text(
+                            text = "${if (videoResolution.widthPx >= 3840) "4K" else "1080p"}·${videoFps.fps}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (videoFps == VideoFpsSetting.FPS_120) AiCyan else GalaxyAmber
+                        )
+                    }
+
+                    // Pro Video Container Format Badge (MP4 / HEVC / RAW MOV / MKV)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(ObsidianGlass)
+                            .border(
+                                width = 1.dp,
+                                color = GalaxyAmber.copy(alpha = 0.65f),
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clickable(onClick = onCycleVideoFormat)
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .testTag("pro_format_badge")
+                    ) {
+                        Text(
+                            text = videoFormat.badgeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = GalaxyAmber
+                        )
+                    }
+                } else {
+                    // Honor Pro Photo Format Badge (JPG / RAW+JPG / PNG)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (photoFormat == PhotoFormatSetting.RAW_DNG) {
+                                    GalaxyAmber.copy(alpha = 0.22f)
+                                } else {
+                                    ObsidianGlass
+                                }
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else DividerSubtle,
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clickable(onClick = onCyclePhotoFormat)
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("pro_format_badge")
+                    ) {
+                        Text(
+                            text = photoFormat.badgeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (photoFormat == PhotoFormatSetting.RAW_DNG) GalaxyAmber else TextPrimaryWhite
+                        )
+                    }
                 }
 
                 Row(
@@ -166,7 +331,7 @@ fun ProControlsOverlay(
                         .border(1.dp, DividerSubtle, RoundedCornerShape(20.dp))
                         .clickable(onClick = onResetPro)
                         .minimumInteractiveComponentSize()
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                         .testTag("pro_reset_button")
                 ) {
                     Icon(
@@ -175,10 +340,10 @@ fun ProControlsOverlay(
                         tint = GalaxyAmber,
                         modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = stringResource(R.string.pro_reset_label),
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = GalaxyAmber
                     )
                 }
@@ -211,6 +376,8 @@ fun ProControlsOverlay(
                     )
                     ProParameterTab.SHUTTER -> ShutterSelectorRow(
                         selectedShutterNs = proSettings.shutterSpeedNs,
+                        isProVideoMode = isProVideoMode,
+                        videoFps = videoFps,
                         onSelectShutter = onUpdateShutter
                     )
                     ProParameterTab.EV -> ExposureSliderRow(
@@ -485,15 +652,27 @@ private fun IsoSelectorRow(
 @Composable
 private fun ShutterSelectorRow(
     selectedShutterNs: Long?,
+    isProVideoMode: Boolean = false,
+    videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
     onSelectShutter: (Long?) -> Unit
 ) {
+    val recommended180ShutterPair: Pair<String, Long> = when (videoFps) {
+        VideoFpsSetting.FPS_30 -> "1/60" to 16_666_666L
+        VideoFpsSetting.FPS_60 -> "1/125" to 8_000_000L
+        VideoFpsSetting.FPS_120 -> "1/250" to 4_000_000L
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "SHUTTER SPEED (1/4000s – 8s)",
+                text = if (isProVideoMode) {
+                    "PRO VIDEO SHUTTER (180° RULE = ${recommended180ShutterPair.first})"
+                } else {
+                    "SHUTTER SPEED (1/4000s – 8s)"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondaryZinc
             )
@@ -513,6 +692,27 @@ private fun ShutterSelectorRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isProVideoMode) {
+                val is180Selected = selectedShutterNs == recommended180ShutterPair.second
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (is180Selected) AiCyan else ObsidianElevated)
+                        .border(1.dp, AiCyan, CircleShape)
+                        .clickable { onSelectShutter(recommended180ShutterPair.second) }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("pro_video_180_shutter_chip")
+                ) {
+                    Text(
+                        text = "180° (${recommended180ShutterPair.first})",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (is180Selected) AmoledBlack else AiCyan
+                    )
+                }
+            }
             SHUTTER_OPTIONS.forEach { (label, nsVal) ->
                 val isSelected = selectedShutterNs == nsVal
                 DialChip(
