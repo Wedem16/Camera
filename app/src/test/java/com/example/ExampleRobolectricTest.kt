@@ -426,7 +426,7 @@ class ExampleRobolectricTest {
         vm1.selectActiveLut(PhotoFilterPreset.SONY_SCINETONE)
         vm1.selectLogProfile(LogProfile.SONY_SLOG3)
         vm1.selectVideoHdrProfile(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG)
-        vm1.updateProIso(400)
+        vm1.updateProIso(12000)
         vm1.updateProShutter(8_000_000L)
         vm1.toggleWatermark()
 
@@ -455,7 +455,7 @@ class ExampleRobolectricTest {
         assertTrue(vm1.uiState.value.isVideoStreamMode)
         assertEquals(CameraMode.PRO, vm1.uiState.value.activeMode)
 
-        // Creating a brand-new CameraViewModel instance (simulating app restart) must restore all user settings including Pro Video
+        // Creating a brand-new CameraViewModel instance (simulating app restart) must restore all user settings including Pro Video & ISO 12000
         val vm2 = CameraViewModel(app)
         assertEquals(com.example.model.VideoFpsSetting.FPS_120, vm2.uiState.value.videoFps)
         assertEquals(500, vm2.uiState.value.videoBitrateMbps)
@@ -466,7 +466,8 @@ class ExampleRobolectricTest {
         assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm2.uiState.value.activeLut)
         assertEquals(LogProfile.SONY_SLOG3, vm2.uiState.value.activeLogProfile)
         assertEquals(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG, vm2.uiState.value.videoHdrProfile)
-        assertEquals(400, vm2.uiState.value.proSettings.iso)
+        assertEquals(12000, vm2.uiState.value.proSettings.iso)
+        assertEquals("12000", vm2.uiState.value.proSettings.formattedIso)
         assertEquals(8_000_000L, vm2.uiState.value.proSettings.shutterSpeedNs)
         assertTrue(vm2.uiState.value.watermarkEnabled)
 

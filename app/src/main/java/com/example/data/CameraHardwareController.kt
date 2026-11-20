@@ -948,10 +948,33 @@ class CameraHardwareController(private val context: Context) {
                     CaptureRequest.CONTROL_AE_MODE,
                     CaptureRequest.CONTROL_AE_MODE_OFF
                 )
-                val effectiveIso = (proSettings.iso ?: 200).coerceIn(50, 6400)
+                val requestedIso = (proSettings.iso ?: 200).coerceIn(50, 12000)
+                val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
+                val sensitivityRange = camera2Info.getCameraCharacteristic(
+                    CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
+                )
+                val nativeMinIso = sensitivityRange?.lower ?: 50
+                val nativeMaxIso = sensitivityRange?.upper ?: 12000
+                val hardwareIso = requestedIso.coerceIn(nativeMinIso, nativeMaxIso)
                 val effectiveShutterNs = (proSettings.shutterSpeedNs ?: 16_666_666L).coerceIn(100_000L, 8_000_000_000L)
-                optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, effectiveIso)
+                optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, hardwareIso)
                 optionsBuilder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, effectiveShutterNs)
+
+                // If requested ISO (e.g., 12000) exceeds native sensor ISO cap, apply remaining gain via Post-RAW Sensitivity Boost
+                val boostRange = camera2Info.getCameraCharacteristic(
+                    CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE
+                )
+                if (boostRange != null) {
+                    val desiredBoost = if (requestedIso > hardwareIso && hardwareIso > 0) {
+                        ((requestedIso.toFloat() / hardwareIso.toFloat()) * 100f).toInt()
+                    } else {
+                        100
+                    }
+                    optionsBuilder.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST,
+                        desiredBoost.coerceIn(boostRange.lower, boostRange.upper)
+                    )
+                }
             } else {
                 optionsBuilder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_MODE,

@@ -35,7 +35,7 @@ enum class CameraMode(
     PRO(
         label = "PRO",
         badgeTitle = "Manual Pro Photo & 4K 120fps Video",
-        description = "Pro Photo & Pro Video with manual M Metering, ISO 50–6400, 180° Shutter, EV, AF/MF Peaking, WB, 10-Bit HDR Log & RAW",
+        description = "Pro Photo & Pro Video with manual M Metering, ISO 50–12000, 180° Shutter, EV, AF/MF Peaking, WB, 10-Bit HDR Log & RAW",
         isDefaultCarousel = true
     ),
     MULTI_VIDEO(

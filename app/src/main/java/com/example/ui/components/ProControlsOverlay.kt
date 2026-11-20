@@ -70,7 +70,7 @@ import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondaryZinc
 import java.util.Locale
 
-private val ISO_OPTIONS = listOf(null, 50, 100, 200, 400, 800, 1600, 3200, 6400)
+private val ISO_OPTIONS = listOf(null, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12000)
 
 private val SHUTTER_OPTIONS = listOf<Pair<String, Long?>>(
     "AUTO" to null,
@@ -617,7 +617,7 @@ private fun IsoSelectorRow(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "SENSOR SENSITIVITY (ISO 50 – 6400)",
+                text = "SENSOR SENSITIVITY (ISO 50 – 12000)",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondaryZinc
             )
