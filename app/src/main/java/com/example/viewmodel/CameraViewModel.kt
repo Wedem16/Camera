@@ -175,12 +175,17 @@ data class CameraUiState(
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val prefs = application.getSharedPreferences("honor_600_cam_settings", android.content.Context.MODE_PRIVATE)
     private val hardwareController = CameraHardwareController(application)
     private val aiRepository = AiSceneOptimizerRepository()
     private val galleryRepository = MediaGalleryRepository(application)
     private val srEngine = OnDeviceSuperResolutionEngine(application)
 
-    private val _uiState = MutableStateFlow(CameraUiState())
+    private var userCustomBitrateMbps: Int? = null
+    private var lastRememberedLut: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL
+    private var lastRememberedLogProfile: LogProfile = LogProfile.STANDARD_REC709
+
+    private val _uiState = MutableStateFlow(loadSavedSettingsFromPrefs())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
     private val logIdGenerator = AtomicLong(1L)
@@ -196,15 +201,217 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     init {
         appendDiagnosticLog(
             "INIT",
-            "Honor 600 Cam | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} | Zero-Lag 60fps 4K Pipeline"
+            "Honor 600 Cam | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} | 4K 120fps & Persistent Settings"
         )
         refreshGallery()
+        viewModelScope.launch {
+            _uiState.collect { currentState ->
+                saveSettingsToPrefs(currentState)
+            }
+        }
+    }
+
+    private fun loadSavedSettingsFromPrefs(): CameraUiState {
+        val base = CameraUiState()
+        if (!prefs.contains("settings_initialized")) {
+            return base
+        }
+        val rememberEnabled = prefs.getBoolean("rememberSettingsEnabled", true)
+        if (!rememberEnabled) {
+            return base.copy(rememberSettingsEnabled = false)
+        }
+        val savedCustomBitrate = prefs.getInt("userCustomBitrateMbps", -1)
+        userCustomBitrateMbps = if (savedCustomBitrate > 0) savedCustomBitrate else null
+
+        val savedLut = runCatching {
+            PhotoFilterPreset.valueOf(prefs.getString("activeLut", base.activeLut.name) ?: base.activeLut.name)
+        }.getOrDefault(base.activeLut)
+        val savedLog = runCatching {
+            LogProfile.valueOf(prefs.getString("activeLogProfile", base.activeLogProfile.name) ?: base.activeLogProfile.name)
+        }.getOrDefault(base.activeLogProfile)
+        lastRememberedLut = runCatching {
+            PhotoFilterPreset.valueOf(prefs.getString("lastRememberedLut", savedLut.name) ?: savedLut.name)
+        }.getOrDefault(savedLut)
+        lastRememberedLogProfile = runCatching {
+            LogProfile.valueOf(prefs.getString("lastRememberedLogProfile", savedLog.name) ?: savedLog.name)
+        }.getOrDefault(savedLog)
+
+        val savedPinnedStr = prefs.getString("pinnedModes", null)
+        val restoredPinned = if (!savedPinnedStr.isNullOrBlank()) {
+            savedPinnedStr.split(",")
+                .mapNotNull { name -> runCatching { CameraMode.valueOf(name) }.getOrNull() }
+                .takeIf { it.size >= 2 } ?: base.pinnedModes
+        } else {
+            base.pinnedModes
+        }
+
+        val savedIso = prefs.getInt("pro_iso", -1).takeIf { it > 0 }
+        val savedShutter = prefs.getLong("pro_shutterNs", -1L).takeIf { it > 0L }
+        val savedFocus = prefs.getFloat("pro_manualFocus", -1f).takeIf { it >= 0f }
+        val restoredPro = ProCameraSettings(
+            meteringMode = runCatching {
+                com.example.model.ProMeteringMode.valueOf(
+                    prefs.getString("pro_metering", base.proSettings.meteringMode.name)
+                        ?: base.proSettings.meteringMode.name
+                )
+            }.getOrDefault(base.proSettings.meteringMode),
+            iso = savedIso,
+            shutterSpeedNs = savedShutter,
+            whiteBalance = runCatching {
+                WhiteBalancePreset.valueOf(
+                    prefs.getString("pro_wb", base.proSettings.whiteBalance.name)
+                        ?: base.proSettings.whiteBalance.name
+                )
+            }.getOrDefault(base.proSettings.whiteBalance),
+            customKelvin = prefs.getInt("pro_kelvin", base.proSettings.customKelvin),
+            manualFocusDistance = savedFocus,
+            focusPeakingEnabled = prefs.getBoolean("pro_peaking", base.proSettings.focusPeakingEnabled),
+            exposureCompensationIndex = prefs.getInt("pro_evIndex", base.proSettings.exposureCompensationIndex)
+        )
+
+        return base.copy(
+            activeMode = runCatching {
+                CameraMode.valueOf(prefs.getString("activeMode", base.activeMode.name) ?: base.activeMode.name)
+            }.getOrDefault(base.activeMode),
+            pinnedModes = restoredPinned,
+            lensFacing = prefs.getInt("lensFacing", base.lensFacing),
+            flashSetting = runCatching {
+                FlashSetting.valueOf(prefs.getString("flashSetting", base.flashSetting.name) ?: base.flashSetting.name)
+            }.getOrDefault(base.flashSetting),
+            timerSetting = runCatching {
+                TimerSetting.valueOf(prefs.getString("timerSetting", base.timerSetting.name) ?: base.timerSetting.name)
+            }.getOrDefault(base.timerSetting),
+            photoResolution = runCatching {
+                PhotoResolutionSetting.valueOf(prefs.getString("photoResolution", base.photoResolution.name) ?: base.photoResolution.name)
+            }.getOrDefault(base.photoResolution),
+            photoFormat = runCatching {
+                PhotoFormatSetting.valueOf(prefs.getString("photoFormat", base.photoFormat.name) ?: base.photoFormat.name)
+            }.getOrDefault(base.photoFormat),
+            aspectRatio = runCatching {
+                AspectRatioSetting.valueOf(prefs.getString("aspectRatio", base.aspectRatio.name) ?: base.aspectRatio.name)
+            }.getOrDefault(base.aspectRatio),
+            videoResolution = runCatching {
+                VideoResolutionSetting.valueOf(prefs.getString("videoResolution", base.videoResolution.name) ?: base.videoResolution.name)
+            }.getOrDefault(base.videoResolution),
+            videoFormat = runCatching {
+                VideoFormatSetting.valueOf(prefs.getString("videoFormat", base.videoFormat.name) ?: base.videoFormat.name)
+            }.getOrDefault(base.videoFormat),
+            videoFps = runCatching {
+                VideoFpsSetting.valueOf(prefs.getString("videoFps", base.videoFps.name) ?: base.videoFps.name)
+            }.getOrDefault(base.videoFps),
+            videoBitrateMbps = prefs.getInt("videoBitrateMbps", base.videoBitrateMbps),
+            videoHdrProfile = runCatching {
+                VideoHdrProfileSetting.valueOf(prefs.getString("videoHdrProfile", base.videoHdrProfile.name) ?: base.videoHdrProfile.name)
+            }.getOrDefault(base.videoHdrProfile),
+            creativeFiltersEnabled = prefs.getBoolean("creativeFiltersEnabled", base.creativeFiltersEnabled),
+            activeLut = savedLut,
+            lutIntensity = prefs.getFloat("lutIntensity", base.lutIntensity),
+            selectedLutCategory = runCatching {
+                LutCategory.valueOf(prefs.getString("selectedLutCategory", base.selectedLutCategory.name) ?: base.selectedLutCategory.name)
+            }.getOrDefault(base.selectedLutCategory),
+            activeLogProfile = savedLog,
+            videoStabilizationEnabled = prefs.getBoolean("videoStabilizationEnabled", base.videoStabilizationEnabled),
+            gridLinesEnabled = prefs.getBoolean("gridLinesEnabled", base.gridLinesEnabled),
+            levelEnabled = prefs.getBoolean("levelEnabled", base.levelEnabled),
+            floatingShutterEnabled = prefs.getBoolean("floatingShutterEnabled", base.floatingShutterEnabled),
+            mirrorReflectionEnabled = prefs.getBoolean("mirrorReflectionEnabled", base.mirrorReflectionEnabled),
+            muteShutterAndAudio = prefs.getBoolean("muteShutterAndAudio", base.muteShutterAndAudio),
+            autoFpsLowLightEnabled = prefs.getBoolean("autoFpsLowLightEnabled", base.autoFpsLowLightEnabled),
+            lockWhiteBalanceInVideo = prefs.getBoolean("lockWhiteBalanceInVideo", base.lockWhiteBalanceInVideo),
+            efficientVideoFormatEnabled = prefs.getBoolean("efficientVideoFormatEnabled", base.efficientVideoFormatEnabled),
+            screenOffRecordingEnabled = prefs.getBoolean("screenOffRecordingEnabled", base.screenOffRecordingEnabled),
+            recommendFiltersEnabled = prefs.getBoolean("recommendFiltersEnabled", base.recommendFiltersEnabled),
+            keepOriginalWithAiEnhance = prefs.getBoolean("keepOriginalWithAiEnhance", base.keepOriginalWithAiEnhance),
+            autoLensSwitchingEnabled = prefs.getBoolean("autoLensSwitchingEnabled", base.autoLensSwitchingEnabled),
+            rememberSettingsEnabled = rememberEnabled,
+            locationTagEnabled = prefs.getBoolean("locationTagEnabled", base.locationTagEnabled),
+            defaultFocalLengthMm = prefs.getInt("defaultFocalLengthMm", base.defaultFocalLengthMm),
+            watermarkEnabled = prefs.getBoolean("watermarkEnabled", base.watermarkEnabled),
+            volumeButtonShutterEnabled = prefs.getBoolean("volumeButtonShutterEnabled", base.volumeButtonShutterEnabled),
+            aiSceneOptimizerEnabled = prefs.getBoolean("aiSceneOptimizerEnabled", base.aiSceneOptimizerEnabled),
+            aiUpscaleMode = runCatching {
+                AiUpscaleMode.valueOf(prefs.getString("aiUpscaleMode", base.aiUpscaleMode.name) ?: base.aiUpscaleMode.name)
+            }.getOrDefault(base.aiUpscaleMode),
+            aiZoomAutoEnhanceEnabled = prefs.getBoolean("aiZoomAutoEnhanceEnabled", base.aiZoomAutoEnhanceEnabled),
+            aiAutoEditAfterCaptureEnabled = prefs.getBoolean("aiAutoEditAfterCaptureEnabled", base.aiAutoEditAfterCaptureEnabled),
+            selectedHonorAiPreset = runCatching {
+                HonorAiGenPreset.valueOf(prefs.getString("selectedHonorAiPreset", base.selectedHonorAiPreset.name) ?: base.selectedHonorAiPreset.name)
+            }.getOrDefault(base.selectedHonorAiPreset),
+            currentZoomRatio = prefs.getFloat("currentZoomRatio", base.currentZoomRatio),
+            portraitBlurStrength = prefs.getFloat("portraitBlurStrength", base.portraitBlurStrength),
+            beautySmoothness = prefs.getFloat("beautySmoothness", base.beautySmoothness),
+            proSettings = restoredPro
+        )
+    }
+
+    private fun saveSettingsToPrefs(state: CameraUiState) {
+        prefs.edit().apply {
+            putBoolean("settings_initialized", true)
+            putBoolean("rememberSettingsEnabled", state.rememberSettingsEnabled)
+            if (state.rememberSettingsEnabled) {
+                putString("activeMode", state.activeMode.name)
+                putString("pinnedModes", state.pinnedModes.joinToString(",") { it.name })
+                putInt("lensFacing", state.lensFacing)
+                putString("flashSetting", state.flashSetting.name)
+                putString("timerSetting", state.timerSetting.name)
+                putString("photoResolution", state.photoResolution.name)
+                putString("photoFormat", state.photoFormat.name)
+                putString("aspectRatio", state.aspectRatio.name)
+                putString("videoResolution", state.videoResolution.name)
+                putString("videoFormat", state.videoFormat.name)
+                putString("videoFps", state.videoFps.name)
+                putInt("videoBitrateMbps", state.videoBitrateMbps)
+                putInt("userCustomBitrateMbps", userCustomBitrateMbps ?: -1)
+                putString("videoHdrProfile", state.videoHdrProfile.name)
+                putBoolean("creativeFiltersEnabled", state.creativeFiltersEnabled)
+                putString("activeLut", state.activeLut.name)
+                putString("lastRememberedLut", lastRememberedLut.name)
+                putFloat("lutIntensity", state.lutIntensity)
+                putString("selectedLutCategory", state.selectedLutCategory.name)
+                putString("activeLogProfile", state.activeLogProfile.name)
+                putString("lastRememberedLogProfile", lastRememberedLogProfile.name)
+                putBoolean("videoStabilizationEnabled", state.videoStabilizationEnabled)
+                putBoolean("gridLinesEnabled", state.gridLinesEnabled)
+                putBoolean("levelEnabled", state.levelEnabled)
+                putBoolean("floatingShutterEnabled", state.floatingShutterEnabled)
+                putBoolean("mirrorReflectionEnabled", state.mirrorReflectionEnabled)
+                putBoolean("muteShutterAndAudio", state.muteShutterAndAudio)
+                putBoolean("autoFpsLowLightEnabled", state.autoFpsLowLightEnabled)
+                putBoolean("lockWhiteBalanceInVideo", state.lockWhiteBalanceInVideo)
+                putBoolean("efficientVideoFormatEnabled", state.efficientVideoFormatEnabled)
+                putBoolean("screenOffRecordingEnabled", state.screenOffRecordingEnabled)
+                putBoolean("recommendFiltersEnabled", state.recommendFiltersEnabled)
+                putBoolean("keepOriginalWithAiEnhance", state.keepOriginalWithAiEnhance)
+                putBoolean("autoLensSwitchingEnabled", state.autoLensSwitchingEnabled)
+                putBoolean("locationTagEnabled", state.locationTagEnabled)
+                putInt("defaultFocalLengthMm", state.defaultFocalLengthMm)
+                putBoolean("watermarkEnabled", state.watermarkEnabled)
+                putBoolean("volumeButtonShutterEnabled", state.volumeButtonShutterEnabled)
+                putBoolean("aiSceneOptimizerEnabled", state.aiSceneOptimizerEnabled)
+                putString("aiUpscaleMode", state.aiUpscaleMode.name)
+                putBoolean("aiZoomAutoEnhanceEnabled", state.aiZoomAutoEnhanceEnabled)
+                putBoolean("aiAutoEditAfterCaptureEnabled", state.aiAutoEditAfterCaptureEnabled)
+                putString("selectedHonorAiPreset", state.selectedHonorAiPreset.name)
+                putFloat("currentZoomRatio", state.currentZoomRatio)
+                putFloat("portraitBlurStrength", state.portraitBlurStrength)
+                putFloat("beautySmoothness", state.beautySmoothness)
+                putString("pro_metering", state.proSettings.meteringMode.name)
+                putInt("pro_iso", state.proSettings.iso ?: -1)
+                putLong("pro_shutterNs", state.proSettings.shutterSpeedNs ?: -1L)
+                putString("pro_wb", state.proSettings.whiteBalance.name)
+                putInt("pro_kelvin", state.proSettings.customKelvin)
+                putFloat("pro_manualFocus", state.proSettings.manualFocusDistance ?: -1f)
+                putBoolean("pro_peaking", state.proSettings.focusPeakingEnabled)
+                putInt("pro_evIndex", state.proSettings.exposureCompensationIndex)
+            }
+            apply()
+        }
     }
 
     /**
      * Samples a single viewfinder frame on-demand (e.g., when switching to PRO mode or opening AI Coach)
      * rather than polling `PreviewView.getBitmap()` in a background loop, ensuring zero GPU readback stalls
-     * and a locked 60fps viewfinder.
+     * and a locked 60fps/120fps viewfinder.
      */
     fun refreshSceneMetricsOnDemand() {
         sceneSamplerJob?.cancel()
@@ -279,6 +486,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             activeMode = state.activeMode,
             lensFacing = state.lensFacing,
             flashSetting = state.flashSetting,
+            torchEnabled = state.torchEnabled,
+            lockWhiteBalanceInVideo = state.lockWhiteBalanceInVideo,
             videoResolution = state.videoResolution,
             videoFps = state.videoFps,
             videoBitrateMbps = state.videoBitrateMbps,
@@ -316,11 +525,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 activeMode = mode,
-                photoResolution = if (mode == CameraMode.HIGH_RES) {
-                    PhotoResolutionSetting.ULTRA_HD_200MP
-                } else {
-                    it.photoResolution
-                },
+                videoFps = if (mode == CameraMode.SLOW_MO) VideoFpsSetting.FPS_120 else it.videoFps,
                 showMoreModesSheet = false,
                 showQuickMenuPopup = false
             )
@@ -372,6 +577,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 showLiveFilterBar = next,
                 creativeFiltersEnabled = if (next) true else it.creativeFiltersEnabled,
+                activeLut = if (next && it.activeLut == PhotoFilterPreset.ORIGINAL) lastRememberedLut else it.activeLut,
+                activeLogProfile = if (next && it.activeLogProfile == LogProfile.STANDARD_REC709) lastRememberedLogProfile else it.activeLogProfile,
                 showQuickMenuPopup = false
             )
         }
@@ -393,14 +600,31 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(showBitrateSheet = visible, showQuickMenuPopup = false) }
     }
 
-    // Step 3: Creative LUT & Log Controls (Gated behind Settings toggle, default OFF / neutral color)
+    // Step 3: Creative LUT & Log Controls (Remembers user's chosen LUT & Log when toggled back ON)
     fun toggleCreativeFilters() {
-        val next = !_uiState.value.creativeFiltersEnabled
+        val current = _uiState.value
+        val next = !current.creativeFiltersEnabled
+        if (!next) {
+            if (current.activeLut != PhotoFilterPreset.ORIGINAL) {
+                lastRememberedLut = current.activeLut
+            }
+            if (current.activeLogProfile != LogProfile.STANDARD_REC709) {
+                lastRememberedLogProfile = current.activeLogProfile
+            }
+        }
         _uiState.update {
             it.copy(
                 creativeFiltersEnabled = next,
-                activeLut = if (next) it.activeLut else PhotoFilterPreset.ORIGINAL,
-                activeLogProfile = if (next) it.activeLogProfile else LogProfile.STANDARD_REC709
+                activeLut = if (next) {
+                    if (it.activeLut != PhotoFilterPreset.ORIGINAL) it.activeLut else lastRememberedLut
+                } else {
+                    PhotoFilterPreset.ORIGINAL
+                },
+                activeLogProfile = if (next) {
+                    if (it.activeLogProfile != LogProfile.STANDARD_REC709) it.activeLogProfile else lastRememberedLogProfile
+                } else {
+                    LogProfile.STANDARD_REC709
+                }
             )
         }
         appendDiagnosticLog("FILTERS", "Creative LUT & Log Filters -> ${if (next) "ENABLED" else "OFF (Neutral)"}")
@@ -415,6 +639,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectActiveLut(lut: PhotoFilterPreset) {
+        lastRememberedLut = lut
         _uiState.update {
             it.copy(
                 activeLut = lut,
@@ -430,6 +655,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectLogProfile(profile: LogProfile) {
+        lastRememberedLogProfile = profile
         _uiState.update {
             it.copy(
                 activeLogProfile = profile,
@@ -457,9 +683,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         previewView: PreviewView? = null
     ) {
         _uiState.update {
+            val nextLog = if (profile.isLogCurve && it.activeLogProfile == LogProfile.STANDARD_REC709) {
+                profile.associatedLogProfile
+            } else {
+                it.activeLogProfile
+            }
+            lastRememberedLogProfile = nextLog
             it.copy(
                 videoHdrProfile = profile,
-                activeLogProfile = if (profile.isLogCurve) profile.associatedLogProfile else it.activeLogProfile
+                activeLogProfile = nextLog
             )
         }
         appendDiagnosticLog(
@@ -567,17 +799,36 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(showHonorAiGenSheet = false) }
     }
 
-    // Video Bitrate up to 1000 Mbps
+    // Video Bitrate up to 1000 Mbps (preserved across resolution & FPS switches!)
     fun updateVideoBitrateMbps(
         mbps: Int,
         lifecycleOwner: LifecycleOwner? = null,
         previewView: PreviewView? = null
     ) {
         val clamped = mbps.coerceIn(10, 1000)
+        userCustomBitrateMbps = clamped
         _uiState.update { it.copy(videoBitrateMbps = clamped) }
-        appendDiagnosticLog("BITRATE", "Target Video Bitrate set to $clamped Mbps (${clamped * 1000} kbps)")
-        if (lifecycleOwner != null && previewView != null && _uiState.value.isVideoStreamMode && !_uiState.value.isRecordingVideo) {
-            bindCameraToLifecycle(lifecycleOwner, previewView)
+        appendDiagnosticLog("BITRATE", "Target Video Bitrate locked to $clamped Mbps (${clamped * 1000} kbps)")
+        val owner = lifecycleOwner ?: lastLifecycleOwner
+        val view = previewView ?: lastPreviewView
+        if (owner != null && view != null && _uiState.value.isVideoStreamMode && !_uiState.value.isRecordingVideo) {
+            bindCameraToLifecycle(owner, view)
+        }
+    }
+
+    private fun defaultBitrateFor(res: VideoResolutionSetting, fps: VideoFpsSetting): Int {
+        return when {
+            res == VideoResolutionSetting.UHD_4K && fps == VideoFpsSetting.FPS_120 ->
+                CameraHardwareController.PRO_4K120_MIN_BITRATE_MBPS
+            res == VideoResolutionSetting.UHD_4K && fps == VideoFpsSetting.FPS_60 ->
+                CameraHardwareController.PRO_4K60_MIN_BITRATE_MBPS
+            res == VideoResolutionSetting.UHD_4K ->
+                CameraHardwareController.PRO_4K30_DEFAULT_BITRATE_MBPS
+            fps == VideoFpsSetting.FPS_120 ->
+                CameraHardwareController.PRO_FHD120_MIN_BITRATE_MBPS
+            fps == VideoFpsSetting.FPS_60 ->
+                CameraHardwareController.PRO_FHD60_DEFAULT_BITRATE_MBPS
+            else -> 80
         }
     }
 
@@ -596,11 +847,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             CameraSelector.LENS_FACING_BACK
         }
+        val defaultRearZoom = when (_uiState.value.defaultFocalLengthMm) {
+            35 -> 1.5f
+            50 -> 2.0f
+            else -> 1.0f
+        }
         _uiState.update {
             it.copy(
                 lensFacing = nextLens,
                 torchEnabled = false,
-                currentZoomRatio = 1.0f,
+                currentZoomRatio = if (nextLens == CameraSelector.LENS_FACING_BACK) defaultRearZoom else 1.0f,
                 extraHybridZoomFactor = 1.0f
             )
         }
@@ -672,64 +928,90 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         showStatusBanner("Photo Output: ${next.fullTitle}")
     }
 
-    fun toggleVideoResolution(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    fun toggleVideoResolution(
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
         val next = if (_uiState.value.videoResolution == VideoResolutionSetting.UHD_4K) {
             VideoResolutionSetting.FHD_1080P
         } else {
             VideoResolutionSetting.UHD_4K
         }
         val currentFps = _uiState.value.videoFps
+        // Preserve user's explicitly set bitrate if they configured one; otherwise use clean non-compounding default
+        val targetBitrate = userCustomBitrateMbps ?: defaultBitrateFor(next, currentFps)
         val resolvedConfig = CameraHardwareController.resolveVideoQualityAndBitrate(
             cameraInfo = null,
             videoResolution = next,
             videoFps = currentFps,
-            requestedBitrateMbps = _uiState.value.videoBitrateMbps
+            requestedBitrateMbps = targetBitrate,
+            videoHdrProfile = _uiState.value.videoHdrProfile
         )
         _uiState.update {
             it.copy(
                 videoResolution = next,
-                videoBitrateMbps = resolvedConfig.effectiveBitrateMbps
+                videoBitrateMbps = targetBitrate
             )
         }
         appendDiagnosticLog("VIDEO-RES", resolvedConfig.profileSummary)
         showStatusBanner(
             if (resolvedConfig.is4k60HighDensityMode) {
-                "4K 60fps Pro Quality: Prioritized ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
+                "4K ${currentFps.label} Pro Quality: ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
             } else {
-                "Video Resolution: ${next.fullTitle} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
+                "Video Resolution: ${next.fullTitle} @ ${currentFps.label} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
             }
         )
-        bindCameraToLifecycle(lifecycleOwner, previewView)
+        val owner = lifecycleOwner ?: lastLifecycleOwner
+        val view = previewView ?: lastPreviewView
+        if (owner != null && view != null) {
+            bindCameraToLifecycle(owner, view)
+        }
     }
 
-    fun toggleVideoFps(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        val next = if (_uiState.value.videoFps == VideoFpsSetting.FPS_60) {
-            VideoFpsSetting.FPS_30
-        } else {
-            VideoFpsSetting.FPS_60
-        }
+    fun toggleVideoFps(
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
+        val entries = VideoFpsSetting.entries // 30fps -> 60fps -> 120fps -> 30fps
+        val currentIdx = entries.indexOf(_uiState.value.videoFps).coerceAtLeast(0)
+        val next = entries[(currentIdx + 1) % entries.size]
+        selectVideoFps(next, lifecycleOwner, previewView)
+    }
+
+    fun selectVideoFps(
+        fps: VideoFpsSetting,
+        lifecycleOwner: LifecycleOwner? = null,
+        previewView: PreviewView? = null
+    ) {
         val currentRes = _uiState.value.videoResolution
+        // Preserve user's explicitly set bitrate if they configured one; otherwise use clean non-compounding default
+        val targetBitrate = userCustomBitrateMbps ?: defaultBitrateFor(currentRes, fps)
         val resolvedConfig = CameraHardwareController.resolveVideoQualityAndBitrate(
             cameraInfo = null,
             videoResolution = currentRes,
-            videoFps = next,
-            requestedBitrateMbps = _uiState.value.videoBitrateMbps
+            videoFps = fps,
+            requestedBitrateMbps = targetBitrate,
+            videoHdrProfile = _uiState.value.videoHdrProfile
         )
         _uiState.update {
             it.copy(
-                videoFps = next,
-                videoBitrateMbps = resolvedConfig.effectiveBitrateMbps
+                videoFps = fps,
+                videoBitrateMbps = targetBitrate
             )
         }
         appendDiagnosticLog("FPS", resolvedConfig.profileSummary)
         showStatusBanner(
             if (resolvedConfig.is4k60HighDensityMode) {
-                "4K 60fps Pro Quality: Prioritized ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
+                "4K ${fps.label} Pro Quality: ${resolvedConfig.effectiveBitrateMbps} Mbps (${String.format(Locale.US, "%.2f", resolvedConfig.dataDensityBitsPerPixelFrame)} bpp)"
             } else {
-                "Frame Rate: ${next.label} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
+                "Frame Rate: ${fps.label} (${resolvedConfig.effectiveBitrateMbps} Mbps)"
             }
         )
-        bindCameraToLifecycle(lifecycleOwner, previewView)
+        val owner = lifecycleOwner ?: lastLifecycleOwner
+        val view = previewView ?: lastPreviewView
+        if (owner != null && view != null) {
+            bindCameraToLifecycle(owner, view)
+        }
     }
 
     fun toggleVideoStabilization() {
@@ -785,7 +1067,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(autoFpsLowLightEnabled = next) }
         showStatusBanner(
             if (next) "Auto Low-Light FPS ON"
-            else "Strict 60fps Lock Active (High-ISO Denoise)"
+            else "Strict ${uiState.value.videoFps.label} Lock Active (High-ISO Denoise)"
         )
     }
 
@@ -875,6 +1157,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val currentPermAudio = _uiState.value.hasAudioPermission
         val currentMedia = _uiState.value.mediaList
         val currentCaps = _uiState.value.hardwareCapabilities
+        userCustomBitrateMbps = null
+        lastRememberedLut = PhotoFilterPreset.ORIGINAL
+        lastRememberedLogProfile = LogProfile.STANDARD_REC709
+        prefs.edit().clear().apply()
         _uiState.value = CameraUiState(
             hasCameraPermission = currentPermCam,
             hasAudioPermission = currentPermAudio,
@@ -1353,6 +1639,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 enableAudio = state.hasAudioPermission && !state.muteShutterAndAudio,
                 videoBitrateMbps = state.videoBitrateMbps,
                 videoResolution = state.videoResolution,
+                videoFps = state.videoFps,
                 videoFormat = state.videoFormat,
                 onDiagnosticLog = { tag, msg -> appendDiagnosticLog(tag, msg) },
                 onEvent = { status ->
@@ -1379,7 +1666,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                             }
                             refreshGallery()
                             showStatusBanner(
-                                "Saved ${state.videoResolution.shortLabel} ${state.videoFormat.badgeLabel} (.${state.videoFormat.extension}) @ ${state.videoBitrateMbps} Mbps"
+                                "Saved ${state.videoResolution.shortLabel} ${state.videoFps.label} ${state.videoFormat.badgeLabel} (.${state.videoFormat.extension}) @ ${state.videoBitrateMbps} Mbps"
                             )
                         }
                         is VideoRecordStatus.Error -> {

@@ -115,6 +115,7 @@ import com.example.model.GeminiSceneCritique
 import com.example.model.LogProfile
 import com.example.model.LutCategory
 import com.example.model.PhotoFilterPreset
+import com.example.model.VideoFpsSetting
 import com.example.model.VideoHdrProfileSetting
 import com.example.ui.theme.AiCyan
 import com.example.ui.theme.AiViolet
@@ -1390,6 +1391,7 @@ fun CameraSettingsDialog(
     onCycleVideoFormat: () -> Unit,
     onCycleVideoHdrProfile: () -> Unit = {},
     onToggleVideoFps: () -> Unit,
+    onSelectVideoFps: (VideoFpsSetting) -> Unit = {},
     onToggleAutoFpsLowLight: () -> Unit = {},
     onToggleLockWhiteBalanceInVideo: () -> Unit = {},
     onToggleEfficientVideoFormat: () -> Unit = {},
@@ -1629,16 +1631,51 @@ fun CameraSettingsDialog(
                     HonorChevronSettingRow(
                         icon = Icons.Default.Videocam,
                         title = "Video frame rate",
-                        subtitle = "Strict 60fps lock with temporal denoise or 30fps",
+                        subtitle = "30fps Cinema, 60fps Smooth, or 120fps High-Speed Pro Video",
                         valueText = state.videoFps.label,
                         onClick = onToggleVideoFps,
                         testTag = "setting_video_fps"
                     )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 52.dp, end = 16.dp, bottom = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        VideoFpsSetting.entries.forEach { fpsOption ->
+                            val isSelected = state.videoFps == fpsOption
+                            val chipAccent = if (fpsOption == VideoFpsSetting.FPS_120) AiCyan else GalaxyAmber
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isSelected) chipAccent.copy(alpha = 0.22f) else AmoledBlack
+                                    )
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (isSelected) chipAccent else DividerSubtle,
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable { onSelectVideoFps(fpsOption) }
+                                    .padding(vertical = 8.dp)
+                                    .testTag("setting_fps_chip_${fpsOption.fps}")
+                            ) {
+                                Text(
+                                    text = fpsOption.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (isSelected) chipAccent else TextPrimaryWhite,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
                     HonorSettingDivider()
                     HonorChevronSettingRow(
                         icon = Icons.Default.Speed,
                         title = "Video encoder bitrate",
-                        subtitle = "Prioritizes high data density (up to 1000 Mbps) for 4K 60fps",
+                        subtitle = "Prioritizes high data density (up to 1000 Mbps) for 4K 60/120fps",
                         valueText = "${state.videoBitrateMbps} Mbps",
                         onClick = {
                             onDismiss()

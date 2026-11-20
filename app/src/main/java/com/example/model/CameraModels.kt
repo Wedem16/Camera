@@ -28,8 +28,8 @@ enum class CameraMode(
     ),
     VIDEO(
         label = "VIDEO",
-        badgeTitle = "4K Pro Video",
-        description = "4K UHD 3840×2160 60fps recording up to 1000 Mbps in MP4, HEVC, RAW MOV & MKV",
+        badgeTitle = "4K 120fps Pro Video",
+        description = "4K UHD & 1080p at 30/60/120fps recording up to 1000 Mbps in MP4, HEVC, RAW MOV & MKV",
         isDefaultCarousel = true
     ),
     PRO(
@@ -46,8 +46,8 @@ enum class CameraMode(
     ),
     SLOW_MO(
         label = "SLOW-MO",
-        badgeTitle = "High-Framerate Slow-Mo",
-        description = "Smooth high-speed motion capture with temporal noise suppression",
+        badgeTitle = "120fps High-Speed Slow-Mo",
+        description = "True 120fps high-speed motion capture with fast ISP temporal noise suppression",
         isDefaultCarousel = false
     ),
     PANORAMA(
@@ -291,7 +291,8 @@ enum class VideoResolutionSetting(
 
 enum class VideoFpsSetting(val fps: Int, val label: String) {
     FPS_30(30, "30fps"),
-    FPS_60(60, "60fps")
+    FPS_60(60, "60fps"),
+    FPS_120(120, "120fps")
 }
 
 /**
@@ -640,6 +641,7 @@ data class HardwareCapabilities(
     val supportsUltraWideOptical: Boolean = true,
     val supports4K: Boolean = true,
     val supports60Fps: Boolean = true,
+    val supports120Fps: Boolean = true,
     val supportsVideoStabilization: Boolean = true,
     val hasOpticalImageStabilization: Boolean = true,
     val supportsManualSensor: Boolean = true,

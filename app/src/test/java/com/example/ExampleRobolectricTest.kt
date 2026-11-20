@@ -35,6 +35,12 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class ExampleRobolectricTest {
 
+    @org.junit.Before
+    fun clearPrefsBeforeTest() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        app.getSharedPreferences("honor_600_cam_settings", Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
     @Test
     fun `cameraViewModel defaults to neutral unchanged capture with no fake branding or LUTs`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -381,5 +387,79 @@ class ExampleRobolectricTest {
         assertTrue(viewModel.uiState.value.levelEnabled)
         assertFalse(viewModel.uiState.value.floatingShutterEnabled)
         assertFalse(viewModel.uiState.value.proSettings.hasAnyManualOverride)
+    }
+
+    @Test
+    fun `cameraViewModel persists user settings without resetting and supports 120fps pro video`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        app.getSharedPreferences("honor_600_cam_settings", Context.MODE_PRIVATE).edit().clear().commit()
+
+        val vm1 = CameraViewModel(app)
+        // Cycle FPS: 60fps (default) -> 120fps -> 30fps -> 60fps
+        assertEquals(com.example.model.VideoFpsSetting.FPS_60, vm1.uiState.value.videoFps)
+        vm1.toggleVideoFps()
+        assertEquals(com.example.model.VideoFpsSetting.FPS_120, vm1.uiState.value.videoFps)
+        assertEquals(120, vm1.uiState.value.videoFps.fps)
+        assertEquals("120fps", vm1.uiState.value.videoFps.label)
+
+        // Verify 4K 120fps bitrate prioritization (>= 320 Mbps floor)
+        val config4k120 = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.UHD_4K,
+            videoFps = com.example.model.VideoFpsSetting.FPS_120,
+            requestedBitrateMbps = 100
+        )
+        assertTrue(config4k120.is4k60HighDensityMode)
+        assertTrue(config4k120.effectiveBitrateMbps >= com.example.data.CameraHardwareController.PRO_4K120_MIN_BITRATE_MBPS)
+
+        // Verify 1080p 120fps bitrate prioritization (>= 120 Mbps floor)
+        val config1080p120 = com.example.data.CameraHardwareController.resolveVideoQualityAndBitrate(
+            cameraInfo = null,
+            videoResolution = VideoResolutionSetting.FHD_1080P,
+            videoFps = com.example.model.VideoFpsSetting.FPS_120,
+            requestedBitrateMbps = 60
+        )
+        assertTrue(config1080p120.effectiveBitrateMbps >= com.example.data.CameraHardwareController.PRO_FHD120_MIN_BITRATE_MBPS)
+
+        // User sets custom bitrate, Sony LUT, HDR Log profile, Pro settings, and resolution
+        vm1.updateVideoBitrateMbps(500)
+        vm1.selectActiveLut(PhotoFilterPreset.SONY_SCINETONE)
+        vm1.selectLogProfile(LogProfile.SONY_SLOG3)
+        vm1.selectVideoHdrProfile(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG)
+        vm1.updateProIso(400)
+        vm1.updateProShutter(8_000_000L)
+        vm1.toggleWatermark()
+
+        // Toggling video resolution or FPS or switching modes must NOT reset the user's 500 Mbps bitrate or LUT
+        vm1.toggleVideoResolution()
+        assertEquals(500, vm1.uiState.value.videoBitrateMbps)
+        vm1.selectMode(CameraMode.VIDEO)
+        assertEquals(500, vm1.uiState.value.videoBitrateMbps)
+        assertEquals(com.example.model.VideoFpsSetting.FPS_120, vm1.uiState.value.videoFps)
+        assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm1.uiState.value.activeLut)
+
+        // Toggling creative filters OFF and back ON must restore the user's chosen SONY_SCINETONE LUT & Log profile
+        vm1.toggleCreativeFilters()
+        assertFalse(vm1.uiState.value.creativeFiltersEnabled)
+        vm1.toggleCreativeFilters()
+        assertTrue(vm1.uiState.value.creativeFiltersEnabled)
+        assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm1.uiState.value.activeLut)
+        assertEquals(LogProfile.SONY_SLOG3, vm1.uiState.value.activeLogProfile)
+
+        // Creating a brand-new CameraViewModel instance (simulating app restart) must restore all user settings
+        val vm2 = CameraViewModel(app)
+        assertEquals(com.example.model.VideoFpsSetting.FPS_120, vm2.uiState.value.videoFps)
+        assertEquals(500, vm2.uiState.value.videoBitrateMbps)
+        assertEquals(VideoResolutionSetting.FHD_1080P, vm2.uiState.value.videoResolution)
+        assertEquals(CameraMode.VIDEO, vm2.uiState.value.activeMode)
+        assertEquals(PhotoFilterPreset.SONY_SCINETONE, vm2.uiState.value.activeLut)
+        assertEquals(LogProfile.SONY_SLOG3, vm2.uiState.value.activeLogProfile)
+        assertEquals(com.example.model.VideoHdrProfileSetting.HONOR_MAGIC_HDR_LOG, vm2.uiState.value.videoHdrProfile)
+        assertEquals(400, vm2.uiState.value.proSettings.iso)
+        assertEquals(8_000_000L, vm2.uiState.value.proSettings.shutterSpeedNs)
+        assertTrue(vm2.uiState.value.watermarkEnabled)
+
+        // Clean up prefs for any subsequent test runs
+        vm2.restoreDefaultCameraSettings()
     }
 }

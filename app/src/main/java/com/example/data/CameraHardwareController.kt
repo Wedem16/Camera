@@ -199,6 +199,49 @@ class CameraHardwareController(private val context: Context) {
         }
     }
 
+    /**
+     * Resolves the best hardware-validated Camera2 `CONTROL_AE_TARGET_FPS_RANGE` for 30fps, 60fps, or 120fps.
+     * Queries `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` and `highSpeedVideoFpsRanges`:
+     * - If the Camera2 device lists a standard AE target FPS range with `upper >= targetFps` (e.g. `120..120` or `30..120`),
+     *   returns the range with the highest `lower` bound matching `targetFps`.
+     * - If a device only exposes `<= 60` in standard `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` while 120fps is selected,
+     *   returns the highest hardware-valid AE range (`60..60`) for the CaptureRequest option so the Camera2 HAL
+     *   never rejects the session, while `VideoCapture.Builder.setTargetFrameRate(Range(120, 120))` drives 120fps encoding.
+     */
+    fun resolveBestHardwareAeFpsRange(lensFacing: Int, targetFps: Int): Range<Int> {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                ?: return Range(targetFps, targetFps)
+            val targetCamera2Facing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+            var availableRanges: Array<Range<Int>>? = null
+            for (camId in cameraManager.cameraIdList) {
+                val chars = runCatching { cameraManager.getCameraCharacteristics(camId) }.getOrNull() ?: continue
+                if (chars.get(CameraCharacteristics.LENS_FACING) == targetCamera2Facing) {
+                    val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    if (!ranges.isNullOrEmpty()) {
+                        availableRanges = ranges
+                        break
+                    }
+                }
+            }
+            val ranges = availableRanges ?: return Range(targetFps, targetFps)
+            // 1. Exact fixed range match (e.g., [120, 120], [60, 60], [30, 30])
+            ranges.firstOrNull { it.lower == targetFps && it.upper == targetFps }?.let { return it }
+            // 2. Range whose upper bound equals targetFps with highest lower bound
+            ranges.filter { it.upper == targetFps }.maxByOrNull { it.lower }?.let { return it }
+            // 3. Range whose upper bound >= targetFps
+            ranges.filter { it.upper >= targetFps }.minWithOrNull(compareBy<Range<Int>> { it.upper }.thenByDescending { it.lower })?.let { return it }
+            // 4. Highest available fixed/high-rate range supported by the Camera2 HAL
+            ranges.maxWithOrNull(compareBy<Range<Int>> { it.upper }.thenBy { it.lower }) ?: Range(targetFps, targetFps)
+        } catch (e: Exception) {
+            Range(targetFps, targetFps)
+        }
+    }
+
     fun bindCamera(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
@@ -206,6 +249,8 @@ class CameraHardwareController(private val context: Context) {
         isVideoMode: Boolean,
         lensFacing: Int,
         flashSetting: FlashSetting,
+        torchEnabled: Boolean = false,
+        lockWhiteBalanceInVideo: Boolean = false,
         videoResolution: VideoResolutionSetting,
         videoFps: VideoFpsSetting,
         videoBitrateMbps: Int,
@@ -334,21 +379,38 @@ class CameraHardwareController(private val context: Context) {
                 val previewBuilder = Preview.Builder()
                     .setResolutionSelector(previewResolutionSelector)
 
-                val useHighQualityHardwareDenoise = isVideoMode || activeMode == CameraMode.NIGHT
+                val is120FpsMode = isVideoMode && videoFps == VideoFpsSetting.FPS_120
+                val useHighQualityHardwareDenoise = (isVideoMode && !is120FpsMode) || activeMode == CameraMode.NIGHT
                 lastBoundIsVideoOrNight = useHighQualityHardwareDenoise
                 lastAppliedHardwareZoom = -1f
                 lastHardwareZoomCallMs = 0L
 
-                // Strict 60fps lock in Video mode + Hardware Temporal Noise Reduction & Chroma Aberration Suppression
+                val hardwareAeFpsRange = if (isVideoMode) {
+                    resolveBestHardwareAeFpsRange(resolvedLens, videoFps.fps)
+                } else {
+                    Range(30, 60)
+                }
+
+                // Strict FPS lock in Video mode + Hardware Temporal Noise Reduction (FAST at 120fps for zero ISP stall)
                 if (isVideoMode) {
+                    val nrMode = if (is120FpsMode) {
+                        CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                    } else {
+                        CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                    }
+                    val hotPixelMode = if (is120FpsMode) {
+                        CameraMetadata.HOT_PIXEL_MODE_FAST
+                    } else {
+                        CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                    }
                     Camera2Interop.Extender(previewBuilder)
                         .setCaptureRequestOption(
                             CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                            Range(videoFps.fps, videoFps.fps)
+                            hardwareAeFpsRange
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.NOISE_REDUCTION_MODE,
-                            CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                            nrMode
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
@@ -356,7 +418,7 @@ class CameraHardwareController(private val context: Context) {
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.HOT_PIXEL_MODE,
-                            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                            hotPixelMode
                         )
                 }
 
@@ -403,7 +465,13 @@ class CameraHardwareController(private val context: Context) {
 
                     val recorder = recorderBuilder.build()
                     val vidCaptureBuilder = VideoCapture.Builder(recorder)
-                        .setTargetFrameRate(Range(videoFps.fps, videoFps.fps))
+                    runCatching {
+                        vidCaptureBuilder.setTargetFrameRate(Range(videoFps.fps, videoFps.fps))
+                    }.onFailure {
+                        runCatching {
+                            vidCaptureBuilder.setTargetFrameRate(hardwareAeFpsRange)
+                        }
+                    }
 
                     // Negotiate hardware 10-Bit HDR / HLG / HDR10 dynamic range on VideoCapture when requested & supported
                     if (videoConfig.negotiatedDynamicRange != DynamicRange.SDR) {
@@ -414,10 +482,21 @@ class CameraHardwareController(private val context: Context) {
                         }
                     }
 
+                    val vidNrMode = if (is120FpsMode) {
+                        CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                    } else {
+                        CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                    }
+                    val vidHotPixelMode = if (is120FpsMode) {
+                        CameraMetadata.HOT_PIXEL_MODE_FAST
+                    } else {
+                        CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                    }
+
                     val vidExtender = Camera2Interop.Extender(vidCaptureBuilder)
                         .setCaptureRequestOption(
                             CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                            Range(videoFps.fps, videoFps.fps)
+                            hardwareAeFpsRange
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.COLOR_CORRECTION_MODE,
@@ -429,7 +508,7 @@ class CameraHardwareController(private val context: Context) {
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.HOT_PIXEL_MODE,
-                            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY
+                            vidHotPixelMode
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.TONEMAP_MODE,
@@ -437,14 +516,14 @@ class CameraHardwareController(private val context: Context) {
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.NOISE_REDUCTION_MODE,
-                            CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                            vidNrMode
                         )
                         .setCaptureRequestOption(
                             CaptureRequest.EDGE_MODE,
                             CameraMetadata.EDGE_MODE_FAST
                         )
 
-                    if (videoHdrProfile.prefers10BitHdr && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    if (videoHdrProfile.prefers10BitHdr && !is120FpsMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                         vidExtender.setCaptureRequestOption(
                             CaptureRequest.SHADING_MODE,
                             CameraMetadata.SHADING_MODE_HIGH_QUALITY
@@ -472,7 +551,7 @@ class CameraHardwareController(private val context: Context) {
                     }
                     onDiagnosticLog(
                         "VIDEO-HDR",
-                        "${videoHdrProfile.fullTitle} (${videoHdrProfile.dynamicRangeStops}) | ${videoConfig.profileSummary}"
+                        "${videoHdrProfile.fullTitle} (${videoHdrProfile.dynamicRangeStops}) | Target=${videoFps.fps}fps (AE=${hardwareAeFpsRange.lower}..${hardwareAeFpsRange.upper}) | ${videoConfig.profileSummary}"
                     )
                 } else {
                     val resolutionStrategy = if (maxNativeSize != null) {
@@ -569,7 +648,11 @@ class CameraHardwareController(private val context: Context) {
                     "Lens=${if (resolvedLens == CameraSelector.LENS_FACING_BACK) "REAR" else "FRONT"} | Optical=${capabilities.sensorMinZoomRatio}x..${capabilities.sensorMaxZoomRatio}x | PhysIDs=${capabilities.physicalCameraIds} | ISP=$activeExtensionLabel"
                 )
 
-                applyCamera2Parameters(proSettings, videoStabilizationEnabled)
+                applyCamera2Parameters(proSettings, videoStabilizationEnabled, lockWhiteBalanceInVideo)
+                setFlashSetting(flashSetting)
+                if (torchEnabled) {
+                    setTorchEnabled(true)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to bind camera hardware", e)
                 onDiagnosticLog("ERROR", "Bind error: ${e.localizedMessage}")
@@ -1026,6 +1109,7 @@ class CameraHardwareController(private val context: Context) {
         enableAudio: Boolean,
         videoBitrateMbps: Int,
         videoResolution: VideoResolutionSetting,
+        videoFps: VideoFpsSetting = VideoFpsSetting.FPS_60,
         videoFormat: VideoFormatSetting,
         onDiagnosticLog: (String, String) -> Unit,
         onEvent: (VideoRecordStatus) -> Unit
@@ -1044,7 +1128,7 @@ class CameraHardwareController(private val context: Context) {
         val contentValues = ContentValues().apply {
             put(
                 MediaStore.MediaColumns.DISPLAY_NAME,
-                "VID_$timestamp.${videoFormat.fileExtension}"
+                "VID_${timestamp}_${videoFps.fps}FPS.${videoFormat.fileExtension}"
             )
             put(MediaStore.MediaColumns.MIME_TYPE, videoFormat.mimeType)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -1064,13 +1148,13 @@ class CameraHardwareController(private val context: Context) {
 
         onDiagnosticLog(
             "RECORDER",
-            "Starting ${videoResolution.fullTitle} [${videoFormat.shortLabel}] | Bitrate: ${videoBitrateMbps} Mbps"
+            "Starting ${videoResolution.fullTitle} @ ${videoFps.label} [${videoFormat.shortLabel}] | Bitrate: ${videoBitrateMbps} Mbps"
         )
 
         activeRecording = pending.start(ContextCompat.getMainExecutor(context)) { recordEvent ->
             when (recordEvent) {
                 is VideoRecordEvent.Start -> {
-                    onDiagnosticLog("RECORDER", "Recording started [${videoFormat.shortLabel}]")
+                    onDiagnosticLog("RECORDER", "Recording started @ ${videoFps.label} [${videoFormat.shortLabel}]")
                     onEvent(
                         VideoRecordStatus.Recording(
                             isPaused = false,
@@ -1114,7 +1198,7 @@ class CameraHardwareController(private val context: Context) {
                         val mb = recordEvent.recordingStats.numBytesRecorded / (1024f * 1024f)
                         onDiagnosticLog(
                             "MEDIASTORE",
-                            "Saved ${videoFormat.shortLabel} (${String.format(Locale.US, "%.1f MB", mb)}) -> ${recordEvent.outputResults.outputUri}"
+                            "Saved ${videoResolution.shortLabel} ${videoFps.label} ${videoFormat.shortLabel} (${String.format(Locale.US, "%.1f MB", mb)}) -> ${recordEvent.outputResults.outputUri}"
                         )
                         onEvent(VideoRecordStatus.Finalized(recordEvent.outputResults.outputUri))
                     } else {
@@ -1154,25 +1238,27 @@ class CameraHardwareController(private val context: Context) {
 
     companion object {
         /**
-         * Minimum prioritized bitrate (in Mbps) when 4K / 60fps is selected so high-motion
-         * 3840×2160 @ 60fps frames maintain pro-grade bits-per-pixel-frame data density (~0.50+ bpp).
+         * Minimum prioritized bitrates (in Mbps) when 4K/60fps or 4K/120fps is selected so high-motion
+         * frames maintain pro-grade bits-per-pixel-frame data density.
          */
+        const val PRO_4K120_MIN_BITRATE_MBPS = 320
         const val PRO_4K60_MIN_BITRATE_MBPS = 250
         const val PRO_4K30_DEFAULT_BITRATE_MBPS = 150
+        const val PRO_FHD120_MIN_BITRATE_MBPS = 120
         const val PRO_FHD60_DEFAULT_BITRATE_MBPS = 100
         const val PRO_4K60_FALLBACK_BITRATE_BPS = 160_000_000
 
         /**
          * Builds the `QualitySelector` and prioritized target encoding bitrate for `VideoCapture`.
          *
-         * - When **4K / 60fps** (`UHD_4K` + `FPS_60`) is selected:
+         * - When **4K / 60fps** or **4K / 120fps** (`UHD_4K` + `FPS_60` / `FPS_120`) is selected:
          *   1. Prioritizes `Quality.UHD` (`3840×2160`) at the head of `QualitySelector.fromOrderedList`
          *      with `FallbackStrategy.higherQualityOrLowerThan(Quality.UHD)`, consulting hardware
          *      `Recorder.getVideoCapabilities(cameraInfo)` when available so the encoder selects its
-         *      highest-tier Level 5.1/5.2 hardware profile.
-         *   2. Prioritizes higher bitrates by applying a `1.6x` high-frame-rate data-density multiplier
-         *      and enforcing a minimum floor of `PRO_4K60_MIN_BITRATE_MBPS` (`250 Mbps`, up to `1000 Mbps`)
-         *      to prevent macroblocking and motion compression artifacts at 497.6M pixels/sec.
+         *      highest-tier Level 5.1/5.2/6.0 hardware profile (with automatic fallback to 1080p 120fps
+         *      if a device's hardware codec caps 120fps at 1080p).
+         *   2. Prioritizes higher bitrates by applying a `1.6x` (60fps) or `2.0x` (120fps) high-frame-rate
+         *      data-density multiplier and enforcing a minimum floor of `250 Mbps` (4K60) or `320 Mbps` (4K120).
          */
         fun resolveVideoQualityAndBitrate(
             cameraInfo: CameraInfo?,
@@ -1183,7 +1269,9 @@ class CameraHardwareController(private val context: Context) {
         ): VideoQualityAndBitrateConfig {
             val is4k = videoResolution == VideoResolutionSetting.UHD_4K
             val is60Fps = videoFps == VideoFpsSetting.FPS_60
-            val is4k60HighDensityMode = is4k && is60Fps
+            val is120Fps = videoFps == VideoFpsSetting.FPS_120
+            val isHighFrameRate = is60Fps || is120Fps
+            val is4k60HighDensityMode = is4k && isHighFrameRate
 
             // Negotiate hardware 10-Bit HDR / HLG / HDR10 dynamic range if requested by VideoHdrProfileSetting
             var negotiatedDynamicRange = DynamicRange.SDR
@@ -1239,10 +1327,14 @@ class CameraHardwareController(private val context: Context) {
                 fallbackStrategy
             )
 
-            // Prioritize higher bitrates when 4K/60fps or 10-Bit HDR Log is selected for pro-grade data density
+            // Prioritize higher bitrates when 4K/60fps, 4K/120fps, or 10-Bit HDR Log is selected for pro-grade data density
             val clampedRequestedMbps = requestedBitrateMbps.coerceIn(10, 1000)
             val hdrBitrateMultiplier = if (videoHdrProfile.prefers10BitHdr) 1.15f else 1.0f
             val effectiveBitrateMbps = when {
+                is4k && is120Fps -> {
+                    val densityBoosted = (clampedRequestedMbps * 2.0f * hdrBitrateMultiplier).toInt()
+                    maxOf(clampedRequestedMbps, densityBoosted, PRO_4K120_MIN_BITRATE_MBPS).coerceIn(PRO_4K120_MIN_BITRATE_MBPS, 1000)
+                }
                 is4k60HighDensityMode -> {
                     // Boost sub-pro bitrates by 1.6x and enforce at least 250 Mbps floor for 4K/60fps
                     val densityBoosted = (clampedRequestedMbps * 1.6f * hdrBitrateMultiplier).toInt()
@@ -1250,6 +1342,10 @@ class CameraHardwareController(private val context: Context) {
                 }
                 is4k -> {
                     (clampedRequestedMbps * hdrBitrateMultiplier).toInt().coerceIn(25, 1000)
+                }
+                is120Fps -> {
+                    val densityBoosted = (clampedRequestedMbps * 1.35f * hdrBitrateMultiplier).toInt()
+                    maxOf(clampedRequestedMbps, densityBoosted, PRO_FHD120_MIN_BITRATE_MBPS).coerceIn(PRO_FHD120_MIN_BITRATE_MBPS, 1000)
                 }
                 is60Fps -> {
                     // 1080p @ 60fps also benefits from at least 50 Mbps floor when user hasn't set lower
@@ -1283,7 +1379,7 @@ class CameraHardwareController(private val context: Context) {
                 append(" | QSelector=[$qualityNames]")
                 append(" | Bitrate=${effectiveBitrateMbps}Mbps")
                 if (is4k60HighDensityMode && effectiveBitrateMbps > clampedRequestedMbps) {
-                    append(" (4K60 Pro Boost from ${clampedRequestedMbps}Mbps)")
+                    append(" (4K${videoFps.fps} Pro Boost from ${clampedRequestedMbps}Mbps)")
                 }
                 append(" | Density=${String.format(Locale.US, "%.2f", dataDensityBpp)} bpp")
             }

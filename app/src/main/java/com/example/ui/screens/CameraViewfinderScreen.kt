@@ -118,6 +118,7 @@ import com.example.model.AiUpscaleMode
 import com.example.model.CameraMode
 import com.example.model.DiagnosticLogEntry
 import com.example.model.FlashSetting
+import com.example.model.VideoFpsSetting
 import com.example.model.LogProfile
 import com.example.model.LutCategory
 import com.example.model.PhotoFilterPreset
@@ -736,6 +737,41 @@ fun CameraViewfinderScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
+                            .background(
+                                if (state.videoFps == VideoFpsSetting.FPS_120) {
+                                    AiCyan.copy(alpha = 0.22f)
+                                } else {
+                                    ObsidianGlass
+                                }
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (state.videoFps == VideoFpsSetting.FPS_120) AiCyan else GalaxyAmber.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                            .clickable {
+                                viewModel.toggleVideoFps(lifecycleOwner, previewView)
+                            }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("quick_row_fps_pill")
+                    ) {
+                        Text(
+                            text = if (state.videoFps == VideoFpsSetting.FPS_120) {
+                                "120FPS PRO"
+                            } else {
+                                state.videoFps.label.uppercase()
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (state.videoFps == VideoFpsSetting.FPS_120) AiCyan else GalaxyAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
                             .background(ObsidianGlass)
                             .border(1.dp, GalaxyAmber.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
                             .clickable { viewModel.setShowBitrateSheet(true) }
@@ -1220,6 +1256,9 @@ fun CameraViewfinderScreen(
                 onToggleVideoFps = {
                     viewModel.toggleVideoFps(lifecycleOwner, previewView)
                 },
+                onSelectVideoFps = { fps ->
+                    viewModel.selectVideoFps(fps, lifecycleOwner, previewView)
+                },
                 onToggleAutoFpsLowLight = viewModel::toggleAutoFpsLowLight,
                 onToggleLockWhiteBalanceInVideo = viewModel::toggleLockWhiteBalanceInVideo,
                 onToggleEfficientVideoFormat = viewModel::toggleEfficientVideoFormat,
@@ -1339,7 +1378,7 @@ private fun HonorTopHeaderBar(
             if (state.isVideoStreamMode) {
                 TopTextPillButton(
                     label = state.videoFps.label,
-                    highlighted = state.videoFps.fps == 60,
+                    highlighted = state.videoFps.fps >= 60,
                     onClick = onToggleFps,
                     testTag = "top_fps_button"
                 )
